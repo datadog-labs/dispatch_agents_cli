@@ -1,6 +1,6 @@
 # Dispatch CLI
 
-Dispatch Agents is a platform for building and deploying AI agents. This CLI manages the full agent lifecycle — from scaffolding and local development to containerization and cloud deployment.
+Dispatch Agents is a platform for building and deploying AI agents, currently in public preview at [dispatchagents.ai](https://dispatchagents.ai/). This CLI manages the full agent lifecycle — from scaffolding and local development to containerization and cloud deployment.
 
 ## Installation
 
@@ -97,4 +97,3 @@ See [SKILL.md](SKILL.md) for the file format specification.
 ## Support
 
 - **GitHub Issues:** [github.com/datadog-labs/dispatch_agents_cli/issues](https://github.com/datadog-labs/dispatch_agents_cli/issues)
-- **Slack:** `#dispatch-agents` (internal)
