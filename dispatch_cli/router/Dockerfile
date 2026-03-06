@@ -1,0 +1,35 @@
+# syntax=docker/dockerfile:1
+FROM python:3.13-slim
+
+WORKDIR /app
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y \
+    curl \
+    git \
+    openssh-client \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install dispatch_agents SDK - use git by default
+ARG SDK_DEPENDENCY="git+ssh://git@github.com/DataDog/dispatch_agents.git#subdirectory=sdk"
+
+# Install SDK from git (default behavior)
+RUN --mount=type=ssh \
+    echo "Installing SDK from git: $SDK_DEPENDENCY" && \
+    mkdir -p ~/.ssh && \
+    ssh-keyscan github.com >> ~/.ssh/known_hosts && \
+    pip install --no-cache-dir "$SDK_DEPENDENCY"
+
+# Copy requirements and install router-specific dependencies
+COPY dispatch_cli/router/requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy the dispatch_cli module
+COPY dispatch_cli /app/dispatch_cli
+
+# Set PYTHONPATH so Python can find the module
+ENV PYTHONPATH=/app
+
+EXPOSE 8080
+
+CMD ["uvicorn", "dispatch_cli.router.service:app", "--host", "0.0.0.0", "--port", "8080"]
