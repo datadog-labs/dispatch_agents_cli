@@ -542,7 +542,7 @@ wheels = [
 [[package]]
 name = "dispatch-agents"
 version = "0.7.2"
-source = { git = "https://github.com/datadog-labs/dispatch_agents_sdk?tag=v0.7.2#15f975ee51d53c57e0810643f4f23ecb269b94fa" }
+source = { git = "https://github.com/datadog-labs/dispatch_agents_sdk?tag=v0.7.2#dba78a0691be6af37fad9cf0746c3a250f9743b5" }
 dependencies = [
     { name = "aiohttp" },
     { name = "grpcio" },
