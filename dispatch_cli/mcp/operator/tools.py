@@ -31,6 +31,8 @@ from ..models import (
     GetScheduleResponse,
     ListSchedulesRequest,
     ListSchedulesResponse,
+    RebootAgentResponse,
+    StopAgentResponse,
     UpdateScheduleRequest,
     UpdateScheduleResponse,
 )
@@ -83,6 +85,24 @@ class GetDeployStatusRequest(BaseModel):
 
 class UninstallAgentRequest(BaseModel):
     """Request payload for uninstalling an agent."""
+
+    agent_name: str = Field(description="Agent name")
+    namespace: str = Field(
+        description="Namespace (required). Use the namespace from the agent's dispatch.yaml, or call list_namespaces to discover valid namespaces."
+    )
+
+
+class StopAgentRequest(BaseModel):
+    """Request payload for stopping an agent."""
+
+    agent_name: str = Field(description="Agent name")
+    namespace: str = Field(
+        description="Namespace (required). Use the namespace from the agent's dispatch.yaml, or call list_namespaces to discover valid namespaces."
+    )
+
+
+class RebootAgentRequest(BaseModel):
+    """Request payload for rebooting an agent."""
 
     agent_name: str = Field(description="Agent name")
     namespace: str = Field(
@@ -1053,6 +1073,35 @@ namespace: {ns}
         ns = _get_namespace(request.namespace)
         result = client.delete_agent(request.agent_name, namespace=ns)
         return UninstallAgentResponse(**result)
+
+    @mcp.tool()
+    async def stop_agent(request: StopAgentRequest) -> StopAgentResponse:
+        """Stop a running agent by scaling to 0 instances and marking as disabled.
+
+        Args:
+            request: StopAgentRequest with agent_name and namespace
+
+        Returns:
+            StopAgentResponse with status and agent_name
+        """
+        ns = _get_namespace(request.namespace)
+        return client.stop_agent(request.agent_name, namespace=ns)
+
+    @mcp.tool()
+    async def reboot_agent(request: RebootAgentRequest) -> RebootAgentResponse:
+        """Reboot an agent by rebuilding from source and forcing a new deployment.
+
+        Preserves environment variables and secrets. Use get_deploy_status with
+        the returned job_id to poll for completion.
+
+        Args:
+            request: RebootAgentRequest with agent_name and namespace
+
+        Returns:
+            RebootAgentResponse with status, agent_name, job_id, and version
+        """
+        ns = _get_namespace(request.namespace)
+        return client.reboot_agent(request.agent_name, namespace=ns)
 
     @mcp.tool()
     async def get_agent_logs(request: GetAgentLogsRequest) -> GetAgentLogsResponse:

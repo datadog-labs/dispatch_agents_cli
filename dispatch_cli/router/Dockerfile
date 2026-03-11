@@ -11,7 +11,7 @@ RUN apt-get update && apt-get install -y \
     && rm -rf /var/lib/apt/lists/*
 
 # Install dispatch_agents SDK - use git by default
-ARG SDK_DEPENDENCY="git+ssh://git@github.com/DataDog/dispatch_agents.git#subdirectory=sdk"
+ARG SDK_DEPENDENCY="git+ssh://git@github.com/datadog-labs/dispatch_agents_sdk.git"
 
 # Install SDK from git (default behavior)
 RUN --mount=type=ssh \

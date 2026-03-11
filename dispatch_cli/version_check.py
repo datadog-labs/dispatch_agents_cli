@@ -130,7 +130,7 @@ def check_and_notify_cli_update(backend_url: str):
     try:
         latest_version = requirements["cli_current"]
         if Version(latest_version) > Version(current_version):
-            upgrade_command = f"uv tool install git+ssh://git@github.com/DataDog/dispatch_agents.git@cli-v{latest_version}#subdirectory=cli --upgrade"
+            upgrade_command = "uv tool install git+ssh://git@github.com/datadog-labs/dispatch_agents_cli.git --upgrade"
 
             # Use raw print to avoid wrapping (logger not initialized yet in callback)
             import sys
@@ -206,20 +206,14 @@ def validate_sdk_version(
     try:
         detected = Version(detected_version)
         minimum = Version(requirements["sdk_minimum"])
-        current = Version(requirements["sdk_current"])
 
         if detected < minimum:
-            update_cmd = f"uv add dispatch_agents@git+ssh://git@github.com/DataDog/dispatch_agents.git@sdk-v{requirements['sdk_current']}#subdirectory=sdk"
+            update_cmd = (
+                "uv add git+ssh://git@github.com/datadog-labs/dispatch_agents_sdk.git"
+            )
             return (
                 "blocked",
                 f"SDK version {detected_version} is below minimum required version {requirements['sdk_minimum']}.\n\n"
-                f"To update, run:\n{update_cmd}",
-            )
-        elif detected < current:
-            update_cmd = f"uv add dispatch_agents@git+ssh://git@github.com/DataDog/dispatch_agents.git@sdk-v{requirements['sdk_current']}#subdirectory=sdk"
-            return (
-                "outdated",
-                f"SDK version {detected_version} is outdated. Latest version is {requirements['sdk_current']}.\n\n"
                 f"To update, run:\n{update_cmd}",
             )
         else:
@@ -272,7 +266,9 @@ def check_sdk_version_suggestion(
         return ("error", "Could not determine CLI's suggested SDK version.")
 
     if detected_version is None:
-        update_cmd = f"uv add dispatch_agents@git+ssh://git@github.com/DataDog/dispatch_agents.git@sdk-v{suggested}#subdirectory=sdk"
+        update_cmd = (
+            "uv add git+ssh://git@github.com/datadog-labs/dispatch_agents_sdk.git"
+        )
         return (
             "not_installed",
             f"SDK not installed. To add it, run:\n{update_cmd}",
@@ -283,7 +279,9 @@ def check_sdk_version_suggestion(
         suggested_ver = Version(suggested)
 
         if detected < suggested_ver:
-            update_cmd = f"uv add dispatch_agents@git+ssh://git@github.com/DataDog/dispatch_agents.git@sdk-v{suggested}#subdirectory=sdk"
+            update_cmd = (
+                "uv add git+ssh://git@github.com/datadog-labs/dispatch_agents_sdk.git"
+            )
             return (
                 "outdated",
                 f"SDK version {detected_version} is older than CLI's suggested version {suggested}.\n\n"

@@ -125,3 +125,24 @@ class DeleteScheduleResponse(BaseModel):
     """Response from deleting a schedule."""
 
     message: str = Field(description="Confirmation message")
+
+
+# Agent Lifecycle Models
+
+
+class StopAgentResponse(BaseModel):
+    """Response from stopping an agent."""
+
+    status: str = Field(description="Stop status")
+    agent_name: str = Field(description="Name of the stopped agent")
+
+
+class RebootAgentResponse(BaseModel):
+    """Response from rebooting an agent."""
+
+    status: str = Field(description="Reboot status")
+    agent_name: str = Field(description="Name of the agent being rebooted")
+    job_id: str = Field(
+        description="Deployment job ID for polling status with get_deploy_status"
+    )
+    version: str = Field(description="Agent version being deployed")

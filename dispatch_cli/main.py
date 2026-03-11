@@ -134,49 +134,16 @@ def login(
 def update_cli():
     """Show the command to update the CLI to the latest version."""
     from .logger import get_logger
-    from .version_check import get_sdk_version_requirements
 
     logger = get_logger()
     current = __version__
     logger.info(f"Current CLI version: {current}\n")
 
-    # Fetch latest version from backend
-    version_data = get_sdk_version_requirements(DISPATCH_API_BASE)
-
-    if version_data:
-        from packaging.version import Version
-
-        try:
-            latest = version_data["cli_current"]
-            current_ver = Version(current)
-            latest_ver = Version(latest)
-
-            if latest_ver > current_ver:
-                logger.warning(f"Latest version available: {latest}\n")
-                logger.code(
-                    f"uv tool install git+ssh://git@github.com/DataDog/dispatch_agents.git@cli-v{latest}#subdirectory=cli --upgrade",
-                    language="bash",
-                    title="To update, run:",
-                )
-            elif latest_ver == current_ver:
-                logger.success("You are already on the latest version!")
-            else:
-                logger.debug(f"You are running a pre-release version ({current})")
-                logger.info(f"Latest stable version: {latest}\n")
-                logger.code(
-                    f"uv tool install git+ssh://git@github.com/DataDog/dispatch_agents.git@cli-v{latest}#subdirectory=cli --upgrade",
-                    language="bash",
-                    title="To install the latest stable version:",
-                )
-        except (KeyError, ValueError):
-            logger.warning("Could not fetch version information")
-    else:
-        logger.warning("Could not check for updates (backend unreachable)\n")
-        logger.code(
-            "uv tool install git+ssh://git@github.com/DataDog/dispatch_agents.git#subdirectory=cli --upgrade",
-            language="bash",
-            title="To update to the latest version from main (not recommended):",
-        )
+    logger.code(
+        "uv tool install git+ssh://git@github.com/datadog-labs/dispatch_agents_cli.git --upgrade",
+        language="bash",
+        title="To install the latest stable version:",
+    )
 
 
 if __name__ == "__main__":

@@ -14,6 +14,8 @@ from .models import (
     GetScheduleResponse,
     ListSchedulesRequest,
     ListSchedulesResponse,
+    RebootAgentResponse,
+    StopAgentResponse,
     UpdateScheduleRequest,
     UpdateScheduleResponse,
 )
@@ -83,6 +85,24 @@ class DispatchAPIClient:
         resp = self.client.delete(url)
         resp.raise_for_status()
         return resp.json()
+
+    def stop_agent(
+        self, agent_name: str, namespace: str | None = None
+    ) -> StopAgentResponse:
+        """Stop agent by scaling to 0 instances and marking as disabled."""
+        url = self._namespaced_url(f"/agents/{agent_name}/stop", namespace)
+        resp = self.client.post(url)
+        resp.raise_for_status()
+        return StopAgentResponse.model_validate(resp.json())
+
+    def reboot_agent(
+        self, agent_name: str, namespace: str | None = None
+    ) -> RebootAgentResponse:
+        """Reboot agent by rebuilding from source and redeploying."""
+        url = self._namespaced_url(f"/agents/{agent_name}/reboot", namespace)
+        resp = self.client.post(url)
+        resp.raise_for_status()
+        return RebootAgentResponse.model_validate(resp.json())
 
     def get_agent_logs(
         self,
