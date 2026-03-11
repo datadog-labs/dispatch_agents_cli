@@ -541,8 +541,8 @@ wheels = [
 
 [[package]]
 name = "dispatch-agents"
-version = "0.7.2"
-source = { git = "https://github.com/datadog-labs/dispatch_agents_sdk?tag=v0.7.2#dba78a0691be6af37fad9cf0746c3a250f9743b5" }
+version = "0.7.3"
+source = { git = "https://github.com/datadog-labs/dispatch_agents_sdk?tag=v0.7.3#5094e776b4352d973af55afd4ffbdc466f2d8703" }
 dependencies = [
     { name = "aiohttp" },
     { name = "grpcio" },
@@ -557,7 +557,7 @@ dependencies = [
 
 [[package]]
 name = "dispatch-cli"
-version = "0.4.3"
+version = "0.5.0"
 source = { editable = "." }
 dependencies = [
     { name = "aiohttp" },
@@ -598,7 +598,7 @@ dev = [
 requires-dist = [
     { name = "aiohttp", specifier = ">=3.13.3" },
     { name = "black", specifier = ">=25.11.0" },
-    { name = "dispatch-agents", git = "https://github.com/datadog-labs/dispatch_agents_sdk?tag=v0.7.2" },
+    { name = "dispatch-agents", git = "https://github.com/datadog-labs/dispatch_agents_sdk?tag=v0.7.3" },
     { name = "fastapi", specifier = ">=0.118.3" },
     { name = "grpcio", specifier = ">=1.78.0" },
     { name = "isort", specifier = ">=6.1.0" },

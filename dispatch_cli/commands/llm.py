@@ -4,6 +4,7 @@ import getpass
 import os
 from typing import Annotated, Any
 
+import questionary
 import requests
 import typer
 
@@ -609,6 +610,70 @@ def delete_provider(
         raise typer.Exit(1)
 
 
+def _try_validate_key(
+    api_key: str,
+    provider: str,
+    namespace: str,
+    auth_headers: dict[str, str],
+) -> bool | None:
+    """Validate an API key against the backend. Returns True/False, or None if unreachable."""
+    log = get_logger()
+    try:
+        resp = requests.post(
+            build_namespaced_url(
+                f"/llm-config/providers/{provider}/validate", namespace
+            ),
+            json={"api_key": api_key},
+            headers=auth_headers,
+            timeout=15,
+        )
+        if resp.ok:
+            result = resp.json()
+            return bool(result.get("valid"))
+    except requests.exceptions.RequestException:
+        log.warning("Could not reach backend for validation. Proceeding...")
+    return None
+
+
+def _validate_api_key_with_retry(
+    api_key: str,
+    provider: str,
+    namespace: str,
+    auth_headers: dict[str, str],
+) -> str:
+    """Validate an API key, offering one retry on failure. Returns the (possibly new) key."""
+
+    log = get_logger()
+
+    valid = _try_validate_key(api_key, provider, namespace, auth_headers)
+    if valid is None:
+        return api_key  # Backend unreachable, proceed
+    if valid:
+        log.success("API key validated successfully")
+        return api_key
+
+    log.error(f"API key validation failed for {provider}")
+    retry = questionary.confirm(
+        "Would you like to enter a different key?", default=True
+    ).ask()
+    if not retry:
+        log.warning("Proceeding with unvalidated key...")
+        return api_key
+
+    new_key = questionary.password(f"Enter your {provider} API key:").ask()
+    if not new_key or not new_key.strip():
+        log.error("API key cannot be empty")
+        raise typer.Exit(1)
+    new_key = new_key.strip()
+
+    retry_valid = _try_validate_key(new_key, provider, namespace, auth_headers)
+    if retry_valid:
+        log.success("API key validated successfully")
+    elif retry_valid is False:
+        log.warning("Key validation still failed. Proceeding anyway...")
+    return new_key
+
+
 @llm_app.command("setup")
 def setup_wizard(
     provider: Annotated[
@@ -634,7 +699,6 @@ def setup_wizard(
         dispatch llm setup
         dispatch llm setup openai
     """
-    import questionary
 
     logger = get_logger()
 
@@ -792,6 +856,12 @@ def setup_wizard(
         logger.error("API key cannot be empty")
         raise typer.Exit(1)
     api_key = api_key.strip()
+
+    # Validate API key before saving
+    if store_remote and resolved_namespace:
+        api_key = _validate_api_key_with_retry(
+            api_key, provider, resolved_namespace, auth_headers
+        )
 
     logger.info("")
 

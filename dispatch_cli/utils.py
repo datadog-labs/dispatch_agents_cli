@@ -57,11 +57,10 @@ DISPATCH_REQUIREMENTS = [
     "aiohttp",
     "asyncio",
 ]
-SDK_BRANCH = os.getenv("SDK_BRANCH", "main")
 # Legacy constant for backwards compatibility - prefer get_sdk_dependency() function
 SDK_DEPENDENCY = os.getenv(
     "SDK_DEPENDENCY",
-    f"git+ssh://git@github.com/DataDog/dispatch_agents.git@{SDK_BRANCH}#subdirectory=sdk",
+    "git+ssh://git@github.com/datadog-labs/dispatch_agents_sdk.git",
 )
 
 
@@ -69,8 +68,8 @@ def get_sdk_dependency() -> str:
     """Get the SDK dependency string using the CLI's bundled SDK version.
 
     Returns a git+ssh URL pointing to the specific SDK version tag that
-    matches the SDK version bundled with this CLI. Falls back to SDK_BRANCH
-    if version detection fails.
+    matches the SDK version bundled with this CLI. Falls back to the default
+    SDK_DEPENDENCY if version detection fails.
 
     Returns:
         SDK dependency string for use with 'uv add'
@@ -85,7 +84,7 @@ def get_sdk_dependency() -> str:
 
         version = get_cli_suggested_sdk_version()
         if version:
-            return f"git+ssh://git@github.com/DataDog/dispatch_agents.git@sdk-v{version}#subdirectory=sdk"
+            return "git+ssh://git@github.com/datadog-labs/dispatch_agents_sdk.git"
     except ImportError:
         pass
 

@@ -1324,7 +1324,7 @@ def validate_dispatch_agents_dependency(abs_path: str) -> bool:
             logger.error("dispatch_agents not found in pyproject.toml dependencies.")
             logger.info("Please add dispatch_agents to your pyproject.toml:")
             logger.code(
-                "uv add dispatch_agents@git+ssh://git@github.com/DataDog/dispatch_sdk.git",
+                "uv add git+ssh://git@github.com/datadog-labs/dispatch_agents_sdk.git",
                 "bash",
             )
             logger.info("(fastapi, uvicorn, etc. will be installed automatically)")
@@ -1351,7 +1351,7 @@ def validate_dispatch_agents_dependency(abs_path: str) -> bool:
 
     logger.error("dispatch_agents not found in dependency files.")
     logger.info(
-        "Please add dispatch_agents@git+ssh://git@github.com/DataDog/dispatch_sdk.git to your requirements.txt"
+        "Please add git+ssh://git@github.com/datadog-labs/dispatch_agents_sdk.git to your requirements.txt"
     )
     return False
 
