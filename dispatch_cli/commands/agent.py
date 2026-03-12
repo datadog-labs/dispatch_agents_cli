@@ -15,7 +15,7 @@ import time
 from datetime import UTC, datetime
 from pathlib import Path
 from string import Template
-from typing import IO, Annotated, cast
+from typing import IO, Annotated, Any, cast
 
 import pathspec
 import requests
@@ -289,6 +289,14 @@ def get_sdk_version_from_agent(agent_path: str) -> str | None:
     return None
 
 
+def _log_version_message(log_fn: Any, code_fn: Any, message: str) -> None:
+    """Log a version check message, splitting the update command to its own code block."""
+    parts = message.split("To update, run:\n")
+    log_fn(parts[0].strip())
+    if len(parts) > 1 and parts[1].strip():
+        code_fn(parts[1].strip(), "bash", "To update, run:")
+
+
 def _check_and_suggest_sdk_update(
     agent_path: str, force: bool = False, warn_only: bool = False
 ) -> bool:
@@ -313,18 +321,8 @@ def _check_and_suggest_sdk_update(
     status, message = check_sdk_version_suggestion(detected_version)
 
     if status == "outdated" and message:
-        # Extract command from message (after "To update, run:\n")
-        parts = message.split("To update, run:\n")
-        warning_msg = parts[0].strip()
-        update_cmd = parts[1].strip() if len(parts) > 1 else ""
-
-        if warn_only:
-            logger.warning(warning_msg)
-        else:
-            logger.error(warning_msg)
-
-        if update_cmd:
-            logger.code(update_cmd, "bash", "To update, run:")
+        log_fn = logger.warning if warn_only else logger.error
+        _log_version_message(log_fn, logger.code, message)
 
         if warn_only:
             # Just warn, don't block
@@ -2316,45 +2314,35 @@ def deploy(
         raise typer.Exit(1)
     agent_name = get_agent_name_from_project(abs_path, config)
 
-    # Check SDK version (every deploy)
-    from dispatch_cli.version_check import validate_sdk_version
+    # Check CLI version against backend minimum
+    from dispatch_cli.version_check import validate_cli_version, validate_sdk_version
 
+    cli_status, cli_message = validate_cli_version(DISPATCH_API_BASE)
+    if cli_status == "blocked":
+        _log_version_message(
+            logger.error,
+            logger.code,
+            cli_message or "CLI version is below the minimum required version.",
+        )
+        raise typer.Exit(1)
+    elif cli_status == "error":
+        logger.warning(cli_message or "CLI version check failed.")
+
+    # Check SDK version (every deploy)
     detected_sdk_version = get_sdk_version_from_agent(abs_path)
     if detected_sdk_version:
         logger.info(f"Detected SDK version: {detected_sdk_version}")
         status, message = validate_sdk_version(detected_sdk_version, DISPATCH_API_BASE)
 
         if status == "blocked":
-            if not message:
-                logger.error("SDK version check failed")
-                raise typer.Exit(1)
-
-            # Extract command from message (after "To update, run:\n")
-            parts = message.split("To update, run:\n")
-            error_msg = parts[0].strip()
-            update_cmd = parts[1].strip() if len(parts) > 1 else ""
-
-            logger = get_logger()
-            logger.error(error_msg)
-
-            if update_cmd:
-                logger.code(update_cmd, "bash", "To update, run:")
-
+            _log_version_message(
+                logger.error, logger.code, message or "SDK version check failed."
+            )
             raise typer.Exit(1)
         elif status == "outdated":
-            if not message:
-                logger.warning("SDK version may be outdated")
-            else:
-                # Extract command from message
-                parts = message.split("To update, run:\n")
-                warning_msg = parts[0].strip()
-                update_cmd = parts[1].strip() if len(parts) > 1 else ""
-
-                logger = get_logger()
-                logger.warning(warning_msg)
-
-                if update_cmd:
-                    logger.code(update_cmd, "bash", "To update, run:")
+            _log_version_message(
+                logger.warning, logger.code, message or "SDK version may be outdated."
+            )
 
             if not force:
                 user_confirmed = typer.confirm(
@@ -2364,7 +2352,7 @@ def deploy(
                     logger.warning("Deployment cancelled.")
                     raise typer.Exit(0)
         elif status == "error":
-            logger.warning(f"{message}")
+            logger.warning(message or "SDK version check failed.")
     else:
         logger.warning(
             "Could not detect SDK version from agent project. "

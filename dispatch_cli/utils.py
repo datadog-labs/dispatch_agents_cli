@@ -84,7 +84,7 @@ def get_sdk_dependency() -> str:
 
         version = get_cli_suggested_sdk_version()
         if version:
-            return "git+ssh://git@github.com/datadog-labs/dispatch_agents_sdk.git"
+            return f"git+ssh://git@github.com/datadog-labs/dispatch_agents_sdk.git@v{version}"
     except ImportError:
         pass
 

@@ -46,26 +46,24 @@ def main_callback(
     set_logger(verbose=verbose)
 
     # Check for CLI updates
-    check_and_notify_cli_update(DISPATCH_API_BASE)
+    check_and_notify_cli_update()
 
 
 @app.command()
 def version():
     """Show dispatch CLI version and optionally check for updates."""
     from .logger import get_logger
-    from .version_check import get_sdk_version_requirements
+    from .version_check import _fetch_latest_cli_version_from_github
 
     logger = get_logger()
     current = __version__
     logger.info(f"Dispatch CLI Version: {current}")
 
-    # Force a version check
-    version_data = get_sdk_version_requirements(DISPATCH_API_BASE)
-    if version_data:
+    latest = _fetch_latest_cli_version_from_github()
+    if latest:
         from packaging.version import Version
 
         try:
-            latest = version_data["cli_current"]
             current_ver = Version(current)
             latest_ver = Version(latest)
 
@@ -76,10 +74,10 @@ def version():
                 logger.success("You are on the latest version!")
             else:
                 logger.debug(f"You are running a pre-release version ({current})")
-        except (KeyError, ValueError):
+        except ValueError:
             logger.warning("Could not check for updates")
     else:
-        logger.warning("Could not check for updates (backend unreachable)")
+        logger.warning("Could not check for updates (GitHub unreachable)")
 
 
 @app.command()
@@ -134,16 +132,21 @@ def login(
 def update_cli():
     """Show the command to update the CLI to the latest version."""
     from .logger import get_logger
+    from .version_check import _fetch_latest_cli_version_from_github
 
     logger = get_logger()
     current = __version__
     logger.info(f"Current CLI version: {current}\n")
 
-    logger.code(
-        "uv tool install git+ssh://git@github.com/datadog-labs/dispatch_agents_cli.git --upgrade",
-        language="bash",
-        title="To install the latest stable version:",
-    )
+    latest = _fetch_latest_cli_version_from_github()
+    if latest:
+        install_cmd = f"uv tool install git+ssh://git@github.com/datadog-labs/dispatch_agents_cli.git@v{latest} --upgrade"
+        title = f"To install the latest stable version (v{latest}):"
+    else:
+        install_cmd = "uv tool install git+ssh://git@github.com/datadog-labs/dispatch_agents_cli.git --upgrade"
+        title = "To install the latest stable version:"
+
+    logger.code(install_cmd, language="bash", title=title)
 
 
 if __name__ == "__main__":
