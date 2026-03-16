@@ -6,6 +6,7 @@ import re
 import sys
 import threading
 import time
+from pathlib import Path
 
 import httpx
 import tomlkit
@@ -246,8 +247,21 @@ async def main(port=50051):
     # Note: The serve() function automatically subscribes the agent to
     # all registered topics with the backend on startup
 
+    # Enable mTLS if DISPATCH_CERT_DIR is set (configured by ECS task definition)
+    cert_dir = os.getenv("DISPATCH_CERT_DIR")
+    if cert_dir is not None and not Path(cert_dir, "ca.crt").exists():
+        logger.error(
+            "DISPATCH_CERT_DIR=%s is set but ca.crt not found — refusing to "
+            "start in insecure mode",
+            cert_dir,
+        )
+        sys.exit(1)
+    use_tls = cert_dir is not None
+
     try:
-        await serve(agent_name=AGENT_NAME, port=port, insecure=True)
+        await serve(
+            agent_name=AGENT_NAME, port=port, insecure=not use_tls, cert_dir=cert_dir
+        )
     except KeyboardInterrupt:
         logger.info("Shutting down gRPC server...")
     except Exception as e:
