@@ -3,13 +3,17 @@
 from __future__ import annotations
 
 import importlib.util
+import subprocess
 import sys
 from pathlib import Path
+
+import pytest
 
 MODULE_PATH = (
     Path(__file__).resolve().parents[2] / ".github" / "scripts" / "version_policy.py"
 )
 MODULE_NAME = "dispatch_cli_ci_version_policy"
+sys.path.insert(0, str(MODULE_PATH.parent))
 
 spec = importlib.util.spec_from_file_location(MODULE_NAME, MODULE_PATH)
 assert spec is not None
@@ -23,7 +27,6 @@ def pyproject(
     *,
     version: str,
     description: str = "Dispatch CLI",
-    packages: list[str] | None = None,
     dependency_sources: dict[str, dict[str, str]] | None = None,
     dev_dependencies: list[str] | None = None,
 ) -> dict[str, object]:
@@ -41,9 +44,7 @@ def pyproject(
         },
         "tool": {
             "hatch": {
-                "build": {
-                    "targets": {"wheel": {"packages": packages or ["dispatch_cli"]}}
-                },
+                "build": {"targets": {"wheel": {"packages": ["dispatch_cli"]}}},
                 "metadata": {"allow-direct-references": True},
             },
             "uv": {
@@ -63,35 +64,30 @@ def pyproject(
     }
 
 
-def test_extract_shipped_path_prefixes_from_hatch_packages():
-    assert version_policy.extract_shipped_path_prefixes(
-        pyproject(version="0.5.0", packages=["dispatch_cli", "other_pkg"])
-    ) == ("dispatch_cli/", "other_pkg/")
-
-
-def test_feature_branch_sdk_change_requires_bump_when_version_is_unchanged():
+def test_release_relevant_change_requires_bump_when_version_is_unchanged():
     result = version_policy.evaluate_policy(
         mode="feature-branch",
-        changed_files=["dispatch_cli/main.py"],
+        source_changed=True,
         current_pyproject=pyproject(version="0.5.0"),
         baseline_pyproject=pyproject(version="0.5.0"),
-        baseline_ref="origin/main",
+        baseline_ref="abc123",
         baseline_version="0.5.0",
     )
 
+    assert result.source_changed is True
     assert result.requires_version_bump is True
     assert result.has_version_bump is False
     assert result.should_release is False
     assert result.failure_reason is not None
 
 
-def test_feature_branch_sdk_change_passes_with_higher_version():
+def test_release_relevant_change_passes_with_higher_version():
     result = version_policy.evaluate_policy(
         mode="feature-branch",
-        changed_files=["dispatch_cli/main.py"],
+        source_changed=True,
         current_pyproject=pyproject(version="0.5.1"),
         baseline_pyproject=pyproject(version="0.5.0"),
-        baseline_ref="origin/main",
+        baseline_ref="abc123",
         baseline_version="0.5.0",
     )
 
@@ -101,13 +97,13 @@ def test_feature_branch_sdk_change_passes_with_higher_version():
     assert result.failure_reason is None
 
 
-def test_feature_branch_docs_only_change_does_not_require_bump():
+def test_docs_only_change_does_not_require_bump():
     result = version_policy.evaluate_policy(
         mode="feature-branch",
-        changed_files=["README.md", ".github/workflows/release.yml"],
+        source_changed=False,
         current_pyproject=pyproject(version="0.5.0"),
         baseline_pyproject=pyproject(version="0.5.0"),
-        baseline_ref="origin/main",
+        baseline_ref="abc123",
         baseline_version="0.5.0",
     )
 
@@ -117,27 +113,13 @@ def test_feature_branch_docs_only_change_does_not_require_bump():
     assert result.failure_reason is None
 
 
-def test_feature_branch_docs_only_change_can_be_behind_main_version():
-    result = version_policy.evaluate_policy(
-        mode="feature-branch",
-        changed_files=["README.md"],
-        current_pyproject=pyproject(version="0.5.0"),
-        baseline_pyproject=pyproject(version="0.5.1"),
-        baseline_ref="origin/main",
-        baseline_version="0.5.1",
-    )
-
-    assert result.requires_version_bump is False
-    assert result.failure_reason is None
-
-
 def test_relevant_pyproject_change_requires_bump():
     result = version_policy.evaluate_policy(
         mode="feature-branch",
-        changed_files=["pyproject.toml"],
+        source_changed=False,
         current_pyproject=pyproject(version="0.5.0", description="Updated CLI"),
         baseline_pyproject=pyproject(version="0.5.0"),
-        baseline_ref="origin/main",
+        baseline_ref="abc123",
         baseline_version="0.5.0",
     )
 
@@ -149,13 +131,13 @@ def test_relevant_pyproject_change_requires_bump():
 def test_dev_tooling_pyproject_change_does_not_require_bump():
     result = version_policy.evaluate_policy(
         mode="feature-branch",
-        changed_files=["pyproject.toml"],
+        source_changed=False,
         current_pyproject=pyproject(
             version="0.5.0",
             dev_dependencies=["pytest>=7.0.0", "ruff>=0.9.0"],
         ),
         baseline_pyproject=pyproject(version="0.5.0"),
-        baseline_ref="origin/main",
+        baseline_ref="abc123",
         baseline_version="0.5.0",
     )
 
@@ -164,10 +146,24 @@ def test_dev_tooling_pyproject_change_does_not_require_bump():
     assert result.failure_reason is None
 
 
+def test_feature_branch_docs_only_change_can_be_behind_main_version():
+    result = version_policy.evaluate_policy(
+        mode="feature-branch",
+        source_changed=False,
+        current_pyproject=pyproject(version="0.5.0"),
+        baseline_pyproject=pyproject(version="0.5.1"),
+        baseline_ref="abc123",
+        baseline_version="0.5.1",
+    )
+
+    assert result.requires_version_bump is False
+    assert result.failure_reason is None
+
+
 def test_release_change_requires_bump_when_version_is_unchanged():
     result = version_policy.evaluate_policy(
         mode="release",
-        changed_files=["dispatch_cli/main.py"],
+        source_changed=True,
         current_pyproject=pyproject(version="0.5.0"),
         baseline_pyproject=pyproject(version="0.4.9"),
         baseline_ref="v0.5.0",
@@ -183,7 +179,7 @@ def test_release_change_requires_bump_when_version_is_unchanged():
 def test_release_change_passes_with_higher_version():
     result = version_policy.evaluate_policy(
         mode="release",
-        changed_files=["dispatch_cli/main.py"],
+        source_changed=True,
         current_pyproject=pyproject(version="0.5.1"),
         baseline_pyproject=pyproject(version="0.5.0"),
         baseline_ref="v0.5.0",
@@ -199,7 +195,7 @@ def test_release_change_passes_with_higher_version():
 def test_release_docs_only_change_does_not_require_release():
     result = version_policy.evaluate_policy(
         mode="release",
-        changed_files=["README.md"],
+        source_changed=False,
         current_pyproject=pyproject(version="0.5.0"),
         baseline_pyproject=pyproject(version="0.5.0"),
         baseline_ref="v0.5.0",
@@ -214,7 +210,7 @@ def test_release_docs_only_change_does_not_require_release():
 def test_release_lower_than_latest_tag_fails():
     result = version_policy.evaluate_policy(
         mode="release",
-        changed_files=["README.md"],
+        source_changed=False,
         current_pyproject=pyproject(version="0.4.9"),
         baseline_pyproject=pyproject(version="0.5.0"),
         baseline_ref="v0.5.0",
@@ -226,17 +222,16 @@ def test_release_lower_than_latest_tag_fails():
     )
 
 
-def test_unknown_top_level_path_requires_bump():
+def test_workflow_classified_release_relevant_change_requires_bump():
     result = version_policy.evaluate_policy(
         mode="feature-branch",
-        changed_files=["new-surface/config.json"],
+        source_changed=True,
         current_pyproject=pyproject(version="0.5.0"),
         baseline_pyproject=pyproject(version="0.5.0"),
-        baseline_ref="origin/main",
+        baseline_ref="abc123",
         baseline_version="0.5.0",
     )
 
-    assert result.unknown_paths == ("new-surface/config.json",)
     assert result.requires_version_bump is True
     assert result.failure_reason is not None
 
@@ -244,7 +239,7 @@ def test_unknown_top_level_path_requires_bump():
 def test_release_without_prior_tag_triggers_initial_release():
     result = version_policy.evaluate_policy(
         mode="release",
-        changed_files=["dispatch_cli/main.py"],
+        source_changed=True,
         current_pyproject=pyproject(version="0.1.0"),
         baseline_pyproject=None,
         baseline_ref="initial repository state",
@@ -255,3 +250,16 @@ def test_release_without_prior_tag_triggers_initial_release():
     assert result.has_version_bump is True
     assert result.should_release is True
     assert result.failure_reason is None
+
+
+def test_fetch_tags_raises_on_failure(monkeypatch):
+    def fake_run(*args, **kwargs):
+        raise subprocess.CalledProcessError(
+            returncode=1,
+            cmd=["git", "fetch", "--force", "--tags", "origin"],
+        )
+
+    monkeypatch.setattr(version_policy, "fetch_tags", fake_run)
+
+    with pytest.raises(subprocess.CalledProcessError):
+        version_policy.fetch_tags()

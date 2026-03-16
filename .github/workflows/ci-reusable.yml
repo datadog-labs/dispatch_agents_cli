@@ -43,7 +43,7 @@ jobs:
       - name: Install dev dependencies
         run: uv sync --group dev --locked
       - name: pytest
-        run: uv run pytest --cov=dispatch_cli --cov-report=term-missing tests .github/tests/test_version_policy.py
+        run: uv run pytest --cov=dispatch_cli --cov-report=term-missing tests .github/tests
 
   build:
     name: Build
