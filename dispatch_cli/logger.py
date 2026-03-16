@@ -7,7 +7,9 @@ Provides:
 - Syntax-highlighted code blocks
 """
 
+import sys
 from contextlib import contextmanager
+from io import StringIO
 from typing import Literal
 
 from rich.console import Console
@@ -28,8 +30,6 @@ class DispatchLogger:
         Args:
             verbose: If True, show all messages including debug. If False, only show important messages.
         """
-        import sys
-
         self.verbose = verbose
         self.console = Console()
         self._live_context: Live | None = None
@@ -52,18 +52,12 @@ class DispatchLogger:
             **kwargs: Extra fields for Rich console
         """
         if self._is_piped:
-            from io import StringIO
-
-            from rich.console import Console as PlainConsole
-
             # Render any Rich object to plain text
             string_io = StringIO()
-            plain_console = PlainConsole(
-                file=string_io, force_terminal=False, no_color=True
-            )
+            plain_console = Console(file=string_io, force_terminal=False, no_color=True)
             plain_console.print(message)
             plain = string_io.getvalue().rstrip("\n")
-            print(f"{plain_prefix}{plain}", flush=True)
+            print(f"{plain_prefix}{plain}", file=sys.stderr, flush=True)
         else:
             self.console.print(message, **kwargs)
 

@@ -34,7 +34,7 @@ dependencies = [
 ]
 
 [tool.uv.sources]
-dispatch_agents = {git = "https://github.com/datadog-labs/dispatch_agents_sdk", tag = "v0.7.3"}
+dispatch_agents = {git = "https://github.com/datadog-labs/dispatch_agents_sdk", tag = "v0.8.0"}
 
 [dependency-groups]
 dev = [

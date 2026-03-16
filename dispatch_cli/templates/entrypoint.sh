@@ -1,17 +1,10 @@
 #!/bin/bash
 # Entrypoint script for Dispatch agent containers
-# Writes MCP config from environment variable to file before starting the agent
 
 set -e
 
-# Debug: log whether MCP_CONFIG_JSON is set
-if [ -n "$MCP_CONFIG_JSON" ]; then
-    echo "MCP_CONFIG_JSON is set (length: ${#MCP_CONFIG_JSON})"
-    echo "$MCP_CONFIG_JSON" > /app/.mcp.json
-    echo "MCP config written to /app/.mcp.json"
-else
-    echo "MCP_CONFIG_JSON is not set - no MCP config will be available"
-fi
+# Merge user-provided and deploy-time MCP config → /tmp/.mcp.json
+python3 /app/merge_mcp_config.py
 
 # If arguments are provided, run them instead of the default command
 # This allows `docker run <image> cat /app/file` to work for schema extraction

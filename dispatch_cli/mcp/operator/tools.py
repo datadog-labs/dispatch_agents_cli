@@ -27,12 +27,16 @@ from ..models import (
     CreateScheduleResponse,
     DeleteScheduleRequest,
     DeleteScheduleResponse,
+    EventRecord,
+    EventTraceResponse,
     GetScheduleRequest,
     GetScheduleResponse,
     ListSchedulesRequest,
     ListSchedulesResponse,
     RebootAgentResponse,
+    RecentTracesResponse,
     StopAgentResponse,
+    TopicListItem,
     UpdateScheduleRequest,
     UpdateScheduleResponse,
 )
@@ -137,6 +141,47 @@ class PublishEventRequest(BaseModel):
     payload: dict[str, Any] = Field(description="Event payload (JSON object)")
     namespace: str = Field(
         description="Namespace (required). Use the namespace from the agent's dispatch.yaml, or call list_namespaces to discover valid namespaces."
+    )
+
+
+class ListTopicsRequest(BaseModel):
+    """Request payload for listing topics."""
+
+    namespace: str = Field(
+        description="Namespace (required). Use the namespace from the agent's dispatch.yaml, or call list_namespaces to discover valid namespaces."
+    )
+
+
+class GetRecentEventsRequest(BaseModel):
+    """Request payload for getting recent events."""
+
+    namespace: str = Field(
+        description="Namespace (required). Use the namespace from the agent's dispatch.yaml, or call list_namespaces to discover valid namespaces."
+    )
+    topic: str | None = Field(default=None, description="Optional topic filter")
+    limit: int = Field(
+        default=20, description="Max events to return (1-100)", ge=1, le=100
+    )
+
+
+class GetEventTraceRequest(BaseModel):
+    """Request payload for getting an event trace."""
+
+    trace_id: str = Field(description="Trace ID to look up")
+    namespace: str = Field(
+        description="Namespace (required). Use the namespace from the agent's dispatch.yaml, or call list_namespaces to discover valid namespaces."
+    )
+
+
+class GetRecentTracesRequest(BaseModel):
+    """Request payload for getting recent traces."""
+
+    namespace: str = Field(
+        description="Namespace (required). Use the namespace from the agent's dispatch.yaml, or call list_namespaces to discover valid namespaces."
+    )
+    topic: str | None = Field(default=None, description="Optional topic filter")
+    limit: int = Field(
+        default=50, description="Max traces to return (1-100)", ge=1, le=100
     )
 
 
@@ -1151,6 +1196,76 @@ namespace: {ns}
         ns = _get_namespace(request.namespace)
         result = client.publish_event(request.topic, request.payload, namespace=ns)
         return PublishEventResponse(**result)
+
+    @mcp.tool()
+    async def list_topics(request: ListTopicsRequest) -> list[TopicListItem]:
+        """List all topics in a namespace.
+
+        Returns topics with their subscribed handlers, webhook configuration,
+        and schema information.
+
+        Args:
+            request: ListTopicsRequest with namespace
+
+        Returns:
+            List of TopicListItem with topic details and subscribers
+        """
+        ns = _get_namespace(request.namespace)
+        return client.list_topics(namespace=ns)
+
+    @mcp.tool()
+    async def get_recent_events(
+        request: GetRecentEventsRequest,
+    ) -> list[EventRecord]:
+        """Get recent events, optionally filtered by topic.
+
+        Args:
+            request: GetRecentEventsRequest with namespace, optional topic filter, and limit
+
+        Returns:
+            List of EventRecord with event details
+        """
+        ns = _get_namespace(request.namespace)
+        return client.get_recent_events(
+            namespace=ns, topic=request.topic, limit=request.limit
+        )
+
+    @mcp.tool()
+    async def get_event_trace(request: GetEventTraceRequest) -> EventTraceResponse:
+        """Get the full event trace tree for a given trace ID.
+
+        Returns a tree-structured view of all events in the trace, enriched
+        with invocation status, LLM call summaries, and MCP tool calls.
+
+        Args:
+            request: GetEventTraceRequest with trace_id and namespace
+
+        Returns:
+            EventTraceResponse with trace_id, total_events, tree-structured events, and optional llm_summary
+        """
+        ns = _get_namespace(request.namespace)
+        return client.get_event_trace(trace_id=request.trace_id, namespace=ns)
+
+    @mcp.tool()
+    async def get_recent_traces(
+        request: GetRecentTracesRequest,
+    ) -> RecentTracesResponse:
+        """Get recent trace summaries for agent invocations.
+
+        Returns summaries of recent traces, including trigger type, involved
+        agents, and event counts. Useful for discovering trace IDs to inspect
+        with get_event_trace.
+
+        Args:
+            request: GetRecentTracesRequest with namespace, optional topic filter, and limit
+
+        Returns:
+            RecentTracesResponse with total_events, unique_traces, and list of TraceSummary
+        """
+        ns = _get_namespace(request.namespace)
+        return client.get_recent_traces(
+            namespace=ns, topic=request.topic, limit=request.limit
+        )
 
     @mcp.tool()
     async def get_agent_functions(

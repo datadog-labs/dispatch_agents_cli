@@ -56,14 +56,25 @@ RUN cp /tmp/dispatch_*.whl /app/dependencies/
 # uv.lock was removed, so this will regenerate it from pyproject.toml
 RUN uv sync --python-preference only-system --find-links /app/dependencies && rm /tmp/*.whl
 
-# Copy entrypoint script (handles MCP config injection)
+# Copy entrypoint and MCP config merge scripts
 COPY entrypoint.sh /app/entrypoint.sh
+COPY merge_mcp_config.py /app/merge_mcp_config.py
 RUN chmod +x /app/entrypoint.sh
+
+# Prepare .mcp.json for read-only filesystem:
+# - If the user shipped a .mcp.json, preserve it as .mcp.json.base
+# - Create a symlink so /app/.mcp.json resolves to /tmp/.mcp.json (writable tmpfs)
+# - The entrypoint merges .mcp.json.base + deploy-time MCP_CONFIG_JSON → /tmp/.mcp.json
+RUN if [ -f /app/.mcp.json ]; then mv /app/.mcp.json /app/.mcp.json.base; fi && \
+    ln -s /tmp/.mcp.json /app/.mcp.json
 
 # Ensure dispatch user owns all files in /app (including .venv created by uv sync)
 RUN chown -R dispatch:dispatch /app
 
 EXPOSE 50051
+
+# Prevent Python from writing .pyc files to read-only __pycache__/ directories
+ENV PYTHONDONTWRITEBYTECODE=1
 
 # Switch to non-root user for runtime
 # This enables Claude Agent SDK's bypassPermissions mode
