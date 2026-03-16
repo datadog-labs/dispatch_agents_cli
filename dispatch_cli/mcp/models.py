@@ -1,6 +1,6 @@
 """Shared Pydantic models for MCP client and tools."""
 
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -146,3 +146,82 @@ class RebootAgentResponse(BaseModel):
         description="Deployment job ID for polling status with get_deploy_status"
     )
     version: str = Field(description="Agent version being deployed")
+
+
+# Topic & Event Models
+
+
+class SubscribedHandler(BaseModel):
+    """A handler subscribed to a topic."""
+
+    agent_name: str
+    handler_name: str
+
+
+class TopicListItem(BaseModel):
+    """A topic item as returned by the list topics endpoint."""
+
+    topic: str
+    topic_id: str | None = None
+    created_at: str | None = None
+    namespace: str | None = None
+    webhook_enabled: bool | None = None
+    webhook_provider: str | None = None
+    subscribers: list[str] = []
+    subscribed_handlers: list[SubscribedHandler] = []
+    integration: str | None = None
+    schema_: dict[str, Any] | None = Field(default=None, alias="schema")
+    schema_locked: bool = False
+    description: str | None = None
+    sdk_docs_url: str | None = None
+
+    model_config = {"populate_by_name": True}
+
+
+class EventRecord(BaseModel):
+    """A single event record from the event history."""
+
+    uid: str | None = None
+    message_type: str | None = None
+    topic: str | None = None
+    function_name: str | None = None
+    schedule_name: str | None = None
+    source: str | None = None
+    timestamp: str | None = None
+    trace_id: str | None = None
+    parent_id: str | None = None
+    payload: dict[str, Any] | None = None
+
+
+class TraceSummary(BaseModel):
+    """Summary of a trace (session) with agent invocations."""
+
+    trace_id: str
+    first_event_timestamp: str
+    event_count: int
+    trigger: str
+    trigger_type: Literal["topic", "function", "schedule", "unknown"]
+    trigger_agent: str | None = None
+    trigger_function: str | None = None
+    schedule_name: str | None = None
+    last_activity: str
+    root_event_uid: str | None = None
+    root_topic: str | None = None
+    agents_involved: list[str]
+
+
+class RecentTracesResponse(BaseModel):
+    """Response from the recent traces endpoint."""
+
+    total_events: int
+    unique_traces: int
+    traces: list[TraceSummary]
+
+
+class EventTraceResponse(BaseModel):
+    """Response from the event trace endpoint."""
+
+    events: list[dict[str, Any]] = Field(
+        description="Tree-structured events with invocation enrichment"
+    )
+    llm_summary: dict[str, Any] | None = None

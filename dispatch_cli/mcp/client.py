@@ -10,12 +10,16 @@ from .models import (
     CreateScheduleResponse,
     DeleteScheduleRequest,
     DeleteScheduleResponse,
+    EventRecord,
+    EventTraceResponse,
     GetScheduleRequest,
     GetScheduleResponse,
     ListSchedulesRequest,
     ListSchedulesResponse,
     RebootAgentResponse,
+    RecentTracesResponse,
     StopAgentResponse,
+    TopicListItem,
     UpdateScheduleRequest,
     UpdateScheduleResponse,
 )
@@ -146,6 +150,50 @@ class DispatchAPIClient:
         resp = self.client.get(url)
         resp.raise_for_status()
         return resp.json()
+
+    def list_topics(self, namespace: str) -> list[TopicListItem]:
+        """List all topics in namespace."""
+        url = self._namespaced_url("/events/topics", namespace)
+        resp = self.client.get(url)
+        resp.raise_for_status()
+        return [TopicListItem.model_validate(t) for t in resp.json()]
+
+    def get_recent_events(
+        self,
+        namespace: str,
+        topic: str | None = None,
+        limit: int = 20,
+    ) -> list[EventRecord]:
+        """Get recent events, optionally filtered by topic."""
+        url = self._namespaced_url("/events/recent", namespace)
+        params: dict[str, str | int] = {"limit": limit}
+        if topic:
+            params["topic"] = topic
+        resp = self.client.get(url, params=params)
+        resp.raise_for_status()
+        return [EventRecord.model_validate(e) for e in resp.json()]
+
+    def get_event_trace(self, trace_id: str, namespace: str) -> EventTraceResponse:
+        """Get full event trace by trace ID."""
+        url = self._namespaced_url(f"/events/trace/{trace_id}", namespace)
+        resp = self.client.get(url)
+        resp.raise_for_status()
+        return EventTraceResponse.model_validate(resp.json())
+
+    def get_recent_traces(
+        self,
+        namespace: str,
+        topic: str | None = None,
+        limit: int = 50,
+    ) -> RecentTracesResponse:
+        """Get recent trace summaries."""
+        url = self._namespaced_url("/events/traces/recent", namespace)
+        params: dict[str, str | int] = {"limit": limit}
+        if topic:
+            params["topic"] = topic
+        resp = self.client.get(url, params=params)
+        resp.raise_for_status()
+        return RecentTracesResponse.model_validate(resp.json())
 
     # Invoke Operations
     def invoke_function(
