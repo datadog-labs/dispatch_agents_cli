@@ -2515,6 +2515,12 @@ def deploy(
                 else:
                     logger.error("Authentication failed after retries")
                     raise typer.Exit(1)
+            elif e.response.status_code == 409:
+                logger.error(
+                    f"A deployment is already in progress for agent '{agent_name}'. "
+                    "Wait for it to finish or cancel it before deploying again."
+                )
+                raise typer.Exit(1)
             else:
                 logger.error(f"Failed to push image to production: {e}")
                 raise typer.Exit(1)
@@ -2593,6 +2599,9 @@ def deploy(
             elif job_status == "failed":
                 error = data.get("error", "Unknown error")
                 logger.error(f"Deployment failed: {error}")
+                raise typer.Exit(1)
+            elif job_status == "cancelled":
+                logger.warning("Deployment was cancelled.")
                 raise typer.Exit(1)
             time.sleep(2)
     except typer.Exit:
@@ -3091,9 +3100,47 @@ def validate(
         else:
             logger.debug(f"Using existing image: {image_tag}")
 
-    # 5. Check handler schemas and typed payloads
+    # 5. Check dependencies resolve for linux (deployment target)
     logger.info("")
-    logger.info("5. Checking handler schemas and typed payloads...")
+    logger.info("5. Checking dependencies resolve for linux...")
+    try:
+        dep_check = subprocess.run(
+            [
+                "uv",
+                "sync",
+                "--dry-run",
+                "--python-platform",
+                "linux",
+                "--no-install-project",
+            ],
+            capture_output=True,
+            text=True,
+            cwd=abs_path,
+        )
+        if dep_check.returncode != 0:
+            stderr = dep_check.stderr.strip()
+            logger.error("Some dependencies don't have linux wheels:")
+            for line in stderr.splitlines():
+                if "error:" in line or "hint:" in line:
+                    logger.error(f"  {line.strip()}")
+            logger.info(
+                "Add tool.uv.required-environments to your pyproject.toml "
+                "to ensure your dependencies have linux wheels:"
+            )
+            logger.info(
+                "  [tool.uv]\n"
+                "  required-environments = [\"sys_platform == 'linux'"
+                " and platform_machine == 'x86_64'\"]"
+            )
+            validation_passed = False
+        else:
+            logger.success("All dependencies have linux-compatible packages.")
+    except FileNotFoundError:
+        logger.debug("uv not found, skipping linux dependency check.")
+
+    # 6. Check handler schemas and typed payloads
+    logger.info("")
+    logger.info("6. Checking handler schemas and typed payloads...")
     try:
         agent_schemas = extract_handler_schemas_from_agent(abs_path)
         if not agent_schemas:
@@ -3112,9 +3159,9 @@ def validate(
         logger.error(f"Handler schema validation failed: {e}")
         validation_passed = False
 
-    # 6. Check schema compatibility
+    # 7. Check schema compatibility
     logger.info("")
-    logger.info("6. Checking schema compatibility...")
+    logger.info("7. Checking schema compatibility...")
     try:
         if not agent_schemas:
             agent_schemas = extract_handler_schemas_from_agent(abs_path)
@@ -3130,9 +3177,9 @@ def validate(
         logger.error(f"Schema validation failed: {e}")
         validation_passed = False
 
-    # 6. Check GitHub integration if agent uses GitHub topics
+    # 8. Check GitHub integration if agent uses GitHub topics
     logger.info("")
-    logger.info("6. Checking GitHub integration requirements...")
+    logger.info("8. Checking GitHub integration requirements...")
     try:
         if agent_schemas:
             github_warnings = check_github_integration_if_needed(
