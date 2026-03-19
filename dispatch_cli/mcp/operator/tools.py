@@ -9,6 +9,7 @@ from typing import Any
 
 import aiohttp
 import httpx
+from dispatch_agents import FeedbackSentiment, FeedbackType
 from pydantic import BaseModel, Field
 
 from dispatch_cli.utils import (
@@ -2135,5 +2136,96 @@ Once we have an agent directory (either existing or newly created), walk me thro
    - Summarize what the logs show
 
 Please walk me through each step, waiting for confirmation before proceeding to the next step."""
+
+    # =========================================================================
+    # Feedback
+    # =========================================================================
+
+    class SubmitFeedbackRequest(BaseModel):
+        """Request payload for submitting feedback."""
+
+        feedback_type: FeedbackType = Field(
+            default="general",
+            description="Type of feedback: bug, feature_request, or general",
+        )
+        message: str = Field(
+            description=(
+                "Feedback message. Include relevant context such as the agent "
+                "name, namespace, what operation was being performed, and any "
+                "error details if reporting a bug."
+            ),
+        )
+        reproduction_steps: str | None = Field(
+            default=None,
+            description=(
+                "For bug reports: minimal, complete steps to reproduce the "
+                "error. Include the exact commands or actions taken, the "
+                "expected outcome, and the actual outcome. Strip out anything "
+                "not needed to trigger the bug — the goal is a minimal "
+                "reproducible example, not a full project dump."
+            ),
+        )
+        sentiment: FeedbackSentiment | None = Field(
+            default=None,
+            description="Optional sentiment: 'positive' or 'negative'",
+        )
+
+    class SubmitFeedbackResponse(BaseModel):
+        """Response from submitting feedback."""
+
+        pass
+
+    @mcp.tool()
+    async def submit_feedback(
+        request: SubmitFeedbackRequest,
+    ) -> SubmitFeedbackResponse:
+        """Send feedback to the Dispatch Agents team.
+
+        If you encounter anything unintuitive, broken, or have suggestions
+        or feature requests about Dispatch Agents, use this tool to send
+        them directly to the team.
+
+        IMPORTANT: Do NOT include any proprietary or personal information
+        about the user's project, company, or data in the message. Keep
+        feedback focused on the Dispatch Agents platform itself.
+
+        Include which Dispatch feature or workflow was involved (e.g.
+        agent deployment, MCP tool usage, scheduling) so the team has
+        context. Your identity is determined automatically from your
+        credentials.
+        """
+        async_client = await client._get_async_client()
+        response = await async_client.post(
+            client._global_url("/api/unstable/feedback/"),
+            json=request.model_dump(),
+        )
+        response.raise_for_status()
+        return SubmitFeedbackResponse()
+
+    # ── MCP Prompts (loaded from markdown files) ──────────────────────
+    # Prompts are the cross-client equivalent of Claude Code skills.
+    # Any MCP client (Claude, Cursor, Codex) can list and invoke them.
+
+    _prompts_dir = Path(__file__).parent / "prompts"
+
+    @mcp.prompt()
+    def getting_started() -> str:
+        """Build and deploy a Dispatch Agent from scratch.
+
+        Step-by-step guide: scaffold, write handlers, test locally, deploy.
+        Use when the user wants to create an agent or get started with
+        Dispatch Agents.
+        """
+        return (_prompts_dir / "getting-started.md").read_text()
+
+    @mcp.prompt()
+    def fork_session() -> str:
+        """Fork the current AI session into a Dispatch agent container.
+
+        Creates a remote copy of the current conversation running inside
+        a container with shell access, persistent storage, and network
+        access to internal services.
+        """
+        return (_prompts_dir / "fork-session.md").read_text()
 
     return mcp

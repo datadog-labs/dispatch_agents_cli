@@ -17,6 +17,43 @@ from dispatch_cli.mcp.operator.tools import (
 
 
 @pytest.mark.unit
+class TestMCPPrompts:
+    """Test that MCP prompt methods return expected text at runtime.
+
+    The prompt functions load markdown files via Path.read_text() when invoked.
+    If a file is renamed or deleted, the MCP server won't fail at startup — it
+    fails later with a FileNotFoundError when a client calls the prompt. These
+    tests exercise the actual runtime code path to catch that.
+    """
+
+    @pytest.fixture()
+    def mcp_server(self):
+        """Create an MCP server instance with a mock API client."""
+        from unittest.mock import MagicMock
+
+        from dispatch_cli.mcp.config import MCPConfig
+        from dispatch_cli.mcp.operator.tools import create_operator_mcp
+
+        config = MCPConfig(api_key="test-key", namespace="test-ns")
+        client = MagicMock()
+        return create_operator_mcp(client, config)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "prompt_name",
+        [
+            "getting_started",
+            "fork_session",
+        ],
+    )
+    async def test_prompt_returns_non_empty_text(self, mcp_server, prompt_name: str):
+        result = await mcp_server.get_prompt(prompt_name)
+        assert result.messages, f"Prompt '{prompt_name}' returned no messages"
+        text = result.messages[0].content.text
+        assert len(text.strip()) > 0, f"Prompt '{prompt_name}' returned empty text"
+
+
+@pytest.mark.unit
 class TestStopLocalRouter:
     """Test the stop_local_router cleanup logic."""
 

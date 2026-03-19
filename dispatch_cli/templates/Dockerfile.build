@@ -8,7 +8,7 @@ ARG BASE_IMAGE=python:3.13-slim
 FROM ${BASE_IMAGE}
 
 # Copy uv from official image (recommended method)
-COPY --from=ghcr.io/astral-sh/uv:0.5.11 /uv /uvx /bin/
+COPY --from=ghcr.io/astral-sh/uv:0.8 /uv /uvx /bin/
 
 # Install system packages if specified (-- prevents option injection)
 ARG SYSTEM_PACKAGES=""
@@ -54,7 +54,14 @@ RUN cp /tmp/dispatch_*.whl /app/dependencies/
 # shipped in dependencies/. uv prefers these over PyPI, preventing untrusted setup.py
 # execution for any package that was pre-built.
 # uv.lock was removed, so this will regenerate it from pyproject.toml
-RUN uv sync --python-preference only-system --find-links /app/dependencies && rm /tmp/*.whl
+#
+# Ensure uv resolves for linux x86_64 — agents always deploy to linux containers.
+# required-environments makes uv skip package versions that lack linux wheels
+# (e.g., claude-agent-sdk 0.1.49 only had macOS wheels) and fall back to a
+# compatible version instead of failing the build.
+RUN grep -q 'required-environments' pyproject.toml 2>/dev/null || \
+    printf '\n[tool.uv]\nrequired-environments = ["sys_platform == '\''linux'\'' and platform_machine == '\''x86_64'\''"]\n' >> pyproject.toml
+RUN uv sync --python-preference only-system --python-platform linux --find-links /app/dependencies && rm /tmp/*.whl
 
 # Copy entrypoint and MCP config merge scripts
 COPY entrypoint.sh /app/entrypoint.sh

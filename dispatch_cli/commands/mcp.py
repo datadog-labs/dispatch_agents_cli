@@ -6,6 +6,7 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Annotated
 
+import tomlkit
 import typer
 
 from dispatch_cli.auth import get_api_key, get_api_key_from_keychain
@@ -26,6 +27,7 @@ class RegisterMode(StrEnum):
     AUTO = "auto"
     CLAUDE = "claude"
     CURSOR = "cursor"
+    CODEX = "codex"
 
 
 def find_git_root() -> Path | None:
@@ -68,6 +70,18 @@ def get_cursor_config_paths() -> list[Path]:
     return [project_config] if cursor_dir.exists() else []
 
 
+def get_codex_config_paths() -> list[Path]:
+    """Get Codex MCP config file paths (project-level only)."""
+    git_root = find_git_root()
+    if git_root:
+        codex_dir = git_root / ".codex"
+    else:
+        codex_dir = Path(".codex")
+
+    config_path = codex_dir / "config.toml"
+    return [config_path] if codex_dir.exists() else []
+
+
 def find_mcp_config_files() -> list[tuple[str, Path]]:
     """Find all existing MCP config files.
 
@@ -85,7 +99,65 @@ def find_mcp_config_files() -> list[tuple[str, Path]]:
         if cursor_path.exists():
             configs.append(("cursor", cursor_path))
 
+    # Check Codex configs (project-level only)
+    for codex_path in get_codex_config_paths():
+        if codex_path.exists():
+            configs.append(("codex", codex_path))
+
     return configs
+
+
+def write_json_mcp_config(
+    config_path: Path, server_name: str, server_config: dict
+) -> None:
+    """Write an MCP server entry to a JSON config file (Claude, Cursor)."""
+    if config_path.exists():
+        with open(config_path) as f:
+            config_data = json.load(f)
+    else:
+        config_data = {}
+
+    if "mcpServers" not in config_data:
+        config_data["mcpServers"] = {}
+
+    config_data["mcpServers"][server_name] = server_config
+
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(config_path, "w") as f:
+        json.dump(config_data, f, indent=2)
+        f.write("\n")
+
+
+def write_toml_mcp_config(
+    config_path: Path, server_name: str, server_config: dict
+) -> None:
+    """Write an MCP server entry to a TOML config file (Codex)."""
+    if config_path.exists():
+        with open(config_path) as f:
+            config_data = tomlkit.load(f)
+    else:
+        config_data = tomlkit.document()
+
+    if "mcp_servers" not in config_data:
+        config_data["mcp_servers"] = tomlkit.table(is_super_table=True)
+
+    mcp_servers = config_data["mcp_servers"]
+    assert isinstance(mcp_servers, dict)
+    mcp_servers[server_name] = server_config
+
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(config_path, "w") as f:
+        tomlkit.dump(config_data, f)
+
+
+def update_mcp_config(
+    client_name: str, config_path: Path, server_name: str, server_config: dict
+) -> None:
+    """Write an MCP server entry to the appropriate config file format."""
+    if client_name == "codex":
+        write_toml_mcp_config(config_path, server_name, server_config)
+    else:
+        write_json_mcp_config(config_path, server_name, server_config)
 
 
 @serve_app.command("agent")
@@ -168,43 +240,43 @@ def serve_agent(
                         get_logger().error("No .cursor directory found")
                         raise typer.Exit(1)
                     configs_to_update = [("cursor", cursor_paths[0])]
+                case RegisterMode.CODEX:
+                    codex_paths = get_codex_config_paths()
+                    if not codex_paths:
+                        # Explicit --register codex: create .codex/ dir
+                        git_root = find_git_root()
+                        base = git_root if git_root else Path(".")
+                        codex_paths = [base / ".codex" / "config.toml"]
+                    configs_to_update = [("codex", codex_paths[0])]
                 case RegisterMode.AUTO:
                     configs_to_update = find_mcp_config_files()
                     if not configs_to_update:
                         get_logger().error("No MCP config files found")
                         raise typer.Exit(1)
 
+            # Build server config
+            server_config = {
+                "command": "dispatch",
+                "args": [
+                    "mcp",
+                    "serve",
+                    "agent",
+                    "--namespace",
+                    namespace,
+                    "--agent",
+                    agent,
+                ]
+                + (["--experimental-tasks"] if experimental_tasks else []),
+            }
+
             # Update configs
             for client_name, config_path in configs_to_update:
-                if config_path.exists():
-                    with open(config_path) as f:
-                        config_data = json.load(f)
+                if client_name == "codex":
+                    server_name = f"dispatch_agent_{namespace}_{agent}"
                 else:
-                    config_data = {}
+                    server_name = f"dispatch-agent-{namespace}-{agent}"
 
-                if "mcpServers" not in config_data:
-                    config_data["mcpServers"] = {}
-
-                server_name = f"dispatch-agent-{namespace}-{agent}"
-                config_data["mcpServers"][server_name] = {
-                    "command": "dispatch",
-                    "args": [
-                        "mcp",
-                        "serve",
-                        "agent",
-                        "--namespace",
-                        namespace,
-                        "--agent",
-                        agent,
-                    ]
-                    + (["--experimental-tasks"] if experimental_tasks else []),
-                }
-
-                config_path.parent.mkdir(parents=True, exist_ok=True)
-                with open(config_path, "w") as f:
-                    json.dump(config_data, f, indent=2)
-                    f.write("\n")
-
+                update_mcp_config(client_name, config_path, server_name, server_config)
                 get_logger().success(f"Updated {client_name} config: {config_path}")
 
             get_logger().info("")
@@ -294,43 +366,47 @@ def serve_operator(
                         get_logger().error("No .cursor directory found")
                         raise typer.Exit(1)
                     configs_to_update = [("cursor", cursor_paths[0])]
+                case RegisterMode.CODEX:
+                    codex_paths = get_codex_config_paths()
+                    if not codex_paths:
+                        # Explicit --register codex: create .codex/ dir
+                        git_root = find_git_root()
+                        base = git_root if git_root else Path(".")
+                        codex_paths = [base / ".codex" / "config.toml"]
+                    configs_to_update = [("codex", codex_paths[0])]
                 case RegisterMode.AUTO:
                     configs_to_update = find_mcp_config_files()
                     if not configs_to_update:
                         get_logger().error("No MCP config files found")
                         raise typer.Exit(1)
 
+            # Build server config
+            args = ["mcp", "serve", "operator"]
+            if namespace:
+                args.extend(["--namespace", namespace])
+
+            server_config = {
+                "command": "dispatch",
+                "args": args,
+            }
+
             # Update configs
             for client_name, config_path in configs_to_update:
-                if config_path.exists():
-                    with open(config_path) as f:
-                        config_data = json.load(f)
+                if client_name == "codex":
+                    server_name = (
+                        f"dispatch_operator_{namespace}"
+                        if namespace
+                        else "dispatch_operator"
+                    )
                 else:
-                    config_data = {}
+                    server_name = (
+                        f"dispatch-operator-{namespace}"
+                        if namespace
+                        else "dispatch-operator"
+                    )
 
-                if "mcpServers" not in config_data:
-                    config_data["mcpServers"] = {}
-
-                server_name = (
-                    f"dispatch-operator-{namespace}"
-                    if namespace
-                    else "dispatch-operator"
-                )
-                args = ["mcp", "serve", "operator"]
-                if namespace:
-                    args.extend(["--namespace", namespace])
-
-                config_data["mcpServers"][server_name] = {
-                    "command": "dispatch",
-                    "args": args,
-                }
-
-                config_path.parent.mkdir(parents=True, exist_ok=True)
-                with open(config_path, "w") as f:
-                    json.dump(config_data, f, indent=2)
-                    f.write("\n")
-
-                print(f"[green]✓[/green] Updated {client_name} config: {config_path}")
+                update_mcp_config(client_name, config_path, server_name, server_config)
+                get_logger().success(f"Updated {client_name} config: {config_path}")
 
             get_logger().info("")
             get_logger().success("Operator MCP server registered")
