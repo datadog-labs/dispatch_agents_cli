@@ -225,3 +225,23 @@ class EventTraceResponse(BaseModel):
         description="Tree-structured events with invocation enrichment"
     )
     llm_summary: dict[str, Any] | None = None
+
+
+# Memory Models
+
+
+class MemoryEntry(BaseModel):
+    """A single long-term memory entry."""
+
+    mem_key: str = Field(description="Memory key")
+    mem_value: str = Field(description="Memory value")
+    last_updated: str | None = Field(
+        default=None, description="Last update timestamp (ISO 8601)"
+    )
+
+
+class ListLongTermMemoriesResponse(BaseModel):
+    """Response from listing long-term memories."""
+
+    agent_name: str = Field(description="Agent name")
+    memories: list[MemoryEntry] = Field(description="List of memory entries")
