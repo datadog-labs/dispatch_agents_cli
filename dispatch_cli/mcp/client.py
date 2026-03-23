@@ -14,6 +14,7 @@ from .models import (
     EventTraceResponse,
     GetScheduleRequest,
     GetScheduleResponse,
+    ListLongTermMemoriesResponse,
     ListSchedulesRequest,
     ListSchedulesResponse,
     RebootAgentResponse,
@@ -269,6 +270,16 @@ class DispatchAPIClient:
         resp = self.client.get(url, params={"limit": limit})
         resp.raise_for_status()
         return resp.json()
+
+    # Memory Operations
+    def list_long_term_memories(
+        self, agent_name: str, namespace: str
+    ) -> ListLongTermMemoriesResponse:
+        """List all long-term memories for an agent."""
+        url = self._namespaced_url(f"/memory/long-term/agent/{agent_name}", namespace)
+        resp = self.client.get(url)
+        resp.raise_for_status()
+        return ListLongTermMemoriesResponse.model_validate(resp.json())
 
     # Async Invoke Operations (for MCP tools that need non-blocking behavior)
     async def invoke_function_async(

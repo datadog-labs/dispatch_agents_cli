@@ -32,6 +32,7 @@ from ..models import (
     EventTraceResponse,
     GetScheduleRequest,
     GetScheduleResponse,
+    ListLongTermMemoriesResponse,
     ListSchedulesRequest,
     ListSchedulesResponse,
     RebootAgentResponse,
@@ -537,6 +538,15 @@ class ReadLocalAgentLogsResponse(BaseModel):
     total_lines: int = Field(description="Total number of lines retrieved")
 
 
+class ListLongTermMemoriesRequest(BaseModel):
+    """Request payload for listing long-term memories."""
+
+    agent_name: str = Field(description="Agent name")
+    namespace: str = Field(
+        description="Namespace the agent belongs to. Use list_namespaces to discover valid namespaces."
+    )
+
+
 # Helper functions for testable core logic
 
 
@@ -805,12 +815,18 @@ await memory.long_term.add(mem_key="user_prefs", mem_val='{"theme": "dark"}')
 # Retrieve data
 value = await memory.long_term.get(mem_key="user_prefs")
 
+# List all memories for the agent
+all_memories = await memory.long_term.list()
+
 # Delete data
 await memory.long_term.delete(mem_key="user_prefs")
 
 # Override agent_name if needed (e.g., reading another agent's data)
 value = await memory.long_term.get(mem_key="user_prefs", agent_name="other-agent")
+all_memories = await memory.long_term.list(agent_name="other-agent")
 ```
+
+You can also use the `list_long_term_memories` MCP tool to inspect an agent's memories.
 
 ### Short-term Memory (Session Store)
 ```python
@@ -1420,6 +1436,23 @@ namespace: {ns}
             created_at=result.get("created_at"),
             completed_at=result.get("completed_at"),
         )
+
+    @mcp.tool()
+    async def list_long_term_memories(
+        request: ListLongTermMemoriesRequest,
+    ) -> ListLongTermMemoriesResponse:
+        """List all long-term memories for an agent.
+
+        Returns all key-value pairs stored in the agent's long-term memory.
+
+        Args:
+            request: ListLongTermMemoriesRequest with agent_name and namespace
+
+        Returns:
+            ListLongTermMemoriesResponse with agent_name and list of memory entries
+        """
+        ns = _get_namespace(request.namespace)
+        return client.list_long_term_memories(request.agent_name, namespace=ns)
 
     @mcp.tool()
     async def start_local_agent_dev(
@@ -2196,7 +2229,7 @@ Please walk me through each step, waiting for confirmation before proceeding to 
         """
         async_client = await client._get_async_client()
         response = await async_client.post(
-            client._global_url("/api/unstable/feedback/"),
+            client._global_url("/feedback/"),
             json=request.model_dump(),
         )
         response.raise_for_status()
