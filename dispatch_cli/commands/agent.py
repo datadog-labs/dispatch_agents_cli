@@ -2291,7 +2291,7 @@ def deploy(
         raise typer.Exit(1)
 
     # Warn if dispatch.yaml secrets include LLM provider API keys
-    # These should be managed via the LLM gateway, not injected directly
+    # These work as fallback credentials but the preferred approach is the LLM gateway
     config_secrets = config.get("secrets", []) or []
     conflicting_keys = [
         s.get("name") for s in config_secrets if s.get("name") in LLM_PROVIDER_KEY_NAMES
@@ -2299,9 +2299,10 @@ def deploy(
     if conflicting_keys:
         logger.warning(
             f"Found LLM provider keys in dispatch.yaml secrets: {conflicting_keys}. "
-            "These are not needed — the Dispatch LLM proxy injects credentials automatically. "
-            "Remove them from your secrets config, or use `dispatch llm setup` to manage LLM credentials. "
-            "Set DISPATCH_LLM_INSTRUMENT=false if you want to bypass the proxy and use them directly."
+            "If the namespace has an LLM provider configured via `dispatch llm setup`, "
+            "these keys are unused — the platform credential takes priority. "
+            "If no platform credential is configured, these keys will be used as a fallback. "
+            "To manage LLM credentials at the platform level, run `dispatch llm setup`."
         )
 
     # Get namespace from CLI option, environment variable, or config file
