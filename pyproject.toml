@@ -1,6 +1,6 @@
 [project]
 name = "dispatch-cli"
-version = "0.7.1"
+version = "0.7.4"
 description = ""
 authors = [
     {name = "Diamond Bishop", email = "diamond.bishop@datadoghq.com"},
@@ -32,9 +32,6 @@ dependencies = [
     "questionary>=2.0.1",
     "pathspec>=1.0.4",
 ]
-
-[tool.uv.sources]
-dispatch_agents = {git = "https://github.com/datadog-labs/dispatch_agents_sdk", tag = "v0.10.0"}
 
 [dependency-groups]
 dev = [

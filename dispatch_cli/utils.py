@@ -27,7 +27,8 @@ DISPATCH_LISTENER_MODULE = "__dispatch_listener__"
 DISPATCH_LISTENER_FILE = f"{DISPATCH_LISTENER_MODULE}.py"
 
 # LLM provider API keys managed by the Dispatch LLM gateway.
-# These don't belong in dispatch.yaml secrets — the proxy injects them at runtime.
+# When present in dispatch.yaml secrets, these serve as fallback credentials
+# if the namespace has no platform-level LLM provider configured.
 LLM_PROVIDER_KEY_NAMES = {
     "OPENAI_API_KEY",
     "ANTHROPIC_API_KEY",
