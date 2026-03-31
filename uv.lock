@@ -557,7 +557,7 @@ wheels = [
 
 [[package]]
 name = "dispatch-agents"
-version = "0.10.1"
+version = "0.11.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "aiohttp" },
@@ -570,14 +570,14 @@ dependencies = [
     { name = "pyyaml" },
     { name = "tomlkit" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/eb/39/824d1fe797a1b47f9dc31822db6eeec9612ad1613f7fd1666c31048b7beb/dispatch_agents-0.10.1.tar.gz", hash = "sha256:29bc4f7027a3b95c1f8f3b5ebc1897a62232b13a85c22614d2620169726d4118", size = 562020, upload-time = "2026-03-27T20:22:50.58Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/a0/c1/bb9f3159c10b2912c8855e4ef14412ed7490dea6778c5b556cad184ba9aa/dispatch_agents-0.11.0.tar.gz", hash = "sha256:6bef801ac2d8cbc7759ae336d6d03951c1568467da965db4a7a63b2c47e766cf", size = 564841, upload-time = "2026-03-30T20:15:38.227Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/c8/67/e29c7f5876fc5c09f3507fe676415343163132ce7da2947df2f113825856/dispatch_agents-0.10.1-py3-none-any.whl", hash = "sha256:08d3509873bb84dbd8212371a5b877f2e58fb745288da0e12ca439b89d04be31", size = 105785, upload-time = "2026-03-27T20:22:49.588Z" },
+    { url = "https://files.pythonhosted.org/packages/6f/3d/8761a9f24b4622aa28d143e1ca560d8b6a03b2060a198208bb0a98b24080/dispatch_agents-0.11.0-py3-none-any.whl", hash = "sha256:c69aeb7437956b073f54f75c2804d4a132b3004310a2785929e254bf89a01421", size = 107780, upload-time = "2026-03-30T20:15:37.289Z" },
 ]
 
 [[package]]
 name = "dispatch-cli"
-version = "0.7.4"
+version = "0.8.0"
 source = { editable = "." }
 dependencies = [
     { name = "aiohttp" },
@@ -1735,7 +1735,7 @@ wheels = [
 
 [[package]]
 name = "requests"
-version = "2.33.0"
+version = "2.33.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "certifi" },
@@ -1743,9 +1743,9 @@ dependencies = [
     { name = "idna" },
     { name = "urllib3" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/34/64/8860370b167a9721e8956ae116825caff829224fbca0ca6e7bf8ddef8430/requests-2.33.0.tar.gz", hash = "sha256:c7ebc5e8b0f21837386ad0e1c8fe8b829fa5f544d8df3b2253bff14ef29d7652", size = 134232, upload-time = "2026-03-25T15:10:41.586Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/5f/a4/98b9c7c6428a668bf7e42ebb7c79d576a1c3c1e3ae2d47e674b468388871/requests-2.33.1.tar.gz", hash = "sha256:18817f8c57c6263968bc123d237e3b8b08ac046f5456bd1e307ee8f4250d3517", size = 134120, upload-time = "2026-03-30T16:09:15.531Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/56/5d/c814546c2333ceea4ba42262d8c4d55763003e767fa169adc693bd524478/requests-2.33.0-py3-none-any.whl", hash = "sha256:3324635456fa185245e24865e810cecec7b4caf933d7eb133dcde67d48cee69b", size = 65017, upload-time = "2026-03-25T15:10:40.382Z" },
+    { url = "https://files.pythonhosted.org/packages/d7/8e/7540e8a2036f79a125c1d2ebadf69ed7901608859186c856fa0388ef4197/requests-2.33.1-py3-none-any.whl", hash = "sha256:4e6d1ef462f3626a1f0a0a9c42dd93c63bad33f9f1c1937509b8c5c8718ab56a", size = 64947, upload-time = "2026-03-30T16:09:13.83Z" },
 ]
 
 [[package]]

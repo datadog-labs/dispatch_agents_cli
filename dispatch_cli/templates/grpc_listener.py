@@ -16,7 +16,7 @@ import yaml
 if not os.path.exists("/app"):
     print("Warning: /app folder not found, assuming local development", flush=True)
     # Check if we're running from project root (dispatch.yaml exists in current dir)
-    if os.path.exists("./dispatch.yaml") or os.path.exists("./.dispatch.yaml"):
+    if os.path.exists("./dispatch.yaml"):
         root_path = "."
     else:
         # Fallback to parent directory (this shouldn't typically happen)
@@ -59,8 +59,6 @@ def load_config():
         with open(pyproject_path, "rb") as f:
             pyproject = tomlkit.load(f)
     yaml_path = os.path.join(root_path, "dispatch.yaml")
-    if not os.path.exists(yaml_path):
-        yaml_path = os.path.join(root_path, ".dispatch.yaml")
     if os.path.exists(yaml_path):
         try:
             with open(yaml_path, encoding="utf-8") as f:

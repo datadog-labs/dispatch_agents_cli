@@ -1,2 +1,2 @@
-## Other Changes
-- Minor improvements to the `agent` command and related utilities.
+## Features
+- Added network egress controls support in local development environments (localstack).

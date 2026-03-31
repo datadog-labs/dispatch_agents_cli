@@ -14,7 +14,6 @@ from pydantic import BaseModel, Field
 
 from dispatch_cli.utils import (
     DISPATCH_YAML,
-    DISPATCH_YAML_HIDDEN,
     LOCAL_ROUTER_PORT,
     LOCAL_ROUTER_URL,
 )
@@ -908,18 +907,22 @@ def create_operator_mcp(client: DispatchAPIClient, config: MCPConfig) -> FastMCP
         return str(ns)
 
     def _read_agent_config(agent_directory: str) -> dict[str, Any]:
-        """Read dispatch.yaml (or .dispatch.yaml) from an agent directory.
+        """Read dispatch.yaml from an agent directory.
 
         Returns the parsed YAML as a dict, or {} if no config file found.
         """
         import yaml
 
-        for name in (DISPATCH_YAML, DISPATCH_YAML_HIDDEN):
-            candidate = os.path.join(agent_directory, name)
-            if os.path.exists(candidate):
-                with open(candidate, encoding="utf-8") as fh:
-                    data = yaml.safe_load(fh) or {}
-                return data if isinstance(data, dict) else {}
+        hidden = os.path.join(agent_directory, ".dispatch.yaml")
+        if os.path.exists(hidden):
+            raise RuntimeError(
+                ".dispatch.yaml is no longer supported; rename it to dispatch.yaml"
+            )
+        candidate = os.path.join(agent_directory, DISPATCH_YAML)
+        if os.path.exists(candidate):
+            with open(candidate, encoding="utf-8") as fh:
+                data = yaml.safe_load(fh) or {}
+            return data if isinstance(data, dict) else {}
         return {}
 
     @mcp.tool()
@@ -2107,7 +2110,7 @@ namespace: {ns}
             ".tox",
             ".mypy_cache",
         }
-        dispatch_names = {DISPATCH_YAML, DISPATCH_YAML_HIDDEN}
+        dispatch_names = {DISPATCH_YAML}
 
         for dirpath, dirnames, filenames in os.walk(cwd):
             depth = Path(dirpath).relative_to(cwd).parts
