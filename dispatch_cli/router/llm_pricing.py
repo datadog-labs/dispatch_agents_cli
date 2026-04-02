@@ -2,7 +2,7 @@
 
 Provides cost calculation using a static fallback pricing table.
 This is simpler than the backend implementation since local dev
-doesn't need dynamic LiteLLM pricing fetching.
+doesn't need dynamic pricing fetching.
 
 Pricing is stored in USD per 1 million tokens internally.
 """

@@ -18,7 +18,7 @@ from typing import get_type_hints
 if not os.path.exists("/app"):
     print("Warning: /app folder not found, assuming local development")
     # Check if we're running from project root (dispatch.yaml exists in current dir)
-    if os.path.exists("./dispatch.yaml") or os.path.exists("./.dispatch.yaml"):
+    if os.path.exists("./dispatch.yaml"):
         root_path = "."
     else:
         # Fallback to parent directory (this shouldn't typically happen)
@@ -50,12 +50,10 @@ from dispatch_agents import BasePayload, Message, get_handler_schemas
 def extract_schemas_and_compliance():
     """Extract handler schemas and check typing compliance."""
     try:
-        # Read entrypoint from dispatch.yaml (or .dispatch.yaml)
+        # Read entrypoint from dispatch.yaml
         import yaml
 
         config_path = os.path.join(root_path, "dispatch.yaml")
-        if not os.path.exists(config_path):
-            config_path = os.path.join(root_path, ".dispatch.yaml")
         with open(config_path) as f:
             config = yaml.safe_load(f)
 

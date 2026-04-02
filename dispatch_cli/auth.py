@@ -5,7 +5,7 @@ import subprocess
 import sys
 from urllib.parse import urlparse
 
-import typer
+import questionary
 
 from dispatch_cli.logger import get_logger
 from dispatch_cli.utils import DISPATCH_API_BASE, DISPATCH_DEPLOY_URL
@@ -291,7 +291,7 @@ def prompt_for_api_key() -> str:
     logger.info("")
 
     while True:
-        api_key = typer.prompt("Enter your API key", hide_input=True)
+        api_key = questionary.password("Enter your API key:").ask() or ""
 
         if not api_key.strip():
             logger.error("API key cannot be empty. Please try again.")

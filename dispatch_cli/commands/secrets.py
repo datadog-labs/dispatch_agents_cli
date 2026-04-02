@@ -4,6 +4,7 @@ import os
 import sys
 from typing import Annotated
 
+import questionary
 import requests
 import typer
 from rich.progress import (
@@ -645,9 +646,7 @@ def local_add_secret(
     # Prompt for value if not provided
     if value is None:
         if sys.stdin.isatty():
-            import getpass
-
-            value = getpass.getpass(f"Enter value for {name}: ")
+            value = questionary.password(f"Enter value for {name}:").ask()
         else:
             logger.error(
                 "No value provided. Use --value or run interactively to be prompted."

@@ -14,7 +14,6 @@ from pydantic import BaseModel, Field
 
 from dispatch_cli.utils import (
     DISPATCH_YAML,
-    DISPATCH_YAML_HIDDEN,
     LOCAL_ROUTER_PORT,
     LOCAL_ROUTER_URL,
 )
@@ -266,14 +265,9 @@ class InvokeLocalFunctionResponse(BaseModel):
 
 
 class StopRouterRequest(BaseModel):
-    """Request payload for stopping local router."""
+    """Request payload for stopping the local router."""
 
-    port: int = Field(
-        default=LOCAL_ROUTER_PORT, description="Port to stop the router on"
-    )
-    stop_all: bool = Field(
-        default=False, description="Stop all tracked routers instead of a specific port"
-    )
+    pass  # No parameters needed — stops the running router
 
 
 class ListRoutersRequest(BaseModel):
@@ -908,18 +902,22 @@ def create_operator_mcp(client: DispatchAPIClient, config: MCPConfig) -> FastMCP
         return str(ns)
 
     def _read_agent_config(agent_directory: str) -> dict[str, Any]:
-        """Read dispatch.yaml (or .dispatch.yaml) from an agent directory.
+        """Read dispatch.yaml from an agent directory.
 
         Returns the parsed YAML as a dict, or {} if no config file found.
         """
         import yaml
 
-        for name in (DISPATCH_YAML, DISPATCH_YAML_HIDDEN):
-            candidate = os.path.join(agent_directory, name)
-            if os.path.exists(candidate):
-                with open(candidate, encoding="utf-8") as fh:
-                    data = yaml.safe_load(fh) or {}
-                return data if isinstance(data, dict) else {}
+        hidden = os.path.join(agent_directory, ".dispatch.yaml")
+        if os.path.exists(hidden):
+            raise RuntimeError(
+                ".dispatch.yaml is no longer supported; rename it to dispatch.yaml"
+            )
+        candidate = os.path.join(agent_directory, DISPATCH_YAML)
+        if os.path.exists(candidate):
+            with open(candidate, encoding="utf-8") as fh:
+                data = yaml.safe_load(fh) or {}
+            return data if isinstance(data, dict) else {}
         return {}
 
     @mcp.tool()
@@ -1469,7 +1467,7 @@ namespace: {ns}
         When done with development, clean up by executing the stop_local_router tool.
 
         Args:
-            request: StartLocalAgentDevRequest with agent_directory and port
+            request: StartLocalAgentDevRequest with agent_directory and router_port
             ctx: MCP context for logging
 
         Returns:
@@ -1643,23 +1641,16 @@ namespace: {ns}
         This also cleans up any agent dev processes started with start_local_agent_dev.
 
         Args:
-            request: StopRouterRequest with port and optional stop_all flag
+            request: StopRouterRequest (no parameters needed)
             ctx: MCP context for logging
 
         Returns:
             StopRouterResponse with status and message
         """
-        if request.stop_all:
-            await ctx.info("Stopping all tracked routers")
-        else:
-            await ctx.info(f"Stopping router on port {request.port}")
+        await ctx.info("Stopping router")
 
         # Build command
         cmd = ["dispatch", "router", "stop"]
-        if request.stop_all:
-            cmd.append("--all")
-        else:
-            cmd.extend(["--port", str(request.port)])
 
         # Run dispatch router stop command
         process = await asyncio.create_subprocess_exec(
@@ -1706,14 +1697,9 @@ namespace: {ns}
         else:
             await ctx.debug("No agent processes to clean up")
 
-        message = (
-            "All routers stopped"
-            if request.stop_all
-            else f"Router on port {request.port} stopped"
-        )
         return StopRouterResponse(
             status="stopped",
-            message=f"{message} (agent dev processes cleaned up)",
+            message="Router stopped (agent dev processes cleaned up)",
         )
 
     @mcp.tool()
@@ -2107,7 +2093,7 @@ namespace: {ns}
             ".tox",
             ".mypy_cache",
         }
-        dispatch_names = {DISPATCH_YAML, DISPATCH_YAML_HIDDEN}
+        dispatch_names = {DISPATCH_YAML}
 
         for dirpath, dirnames, filenames in os.walk(cwd):
             depth = Path(dirpath).relative_to(cwd).parts

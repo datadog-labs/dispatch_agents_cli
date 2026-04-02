@@ -3,37 +3,41 @@
 import json
 import os
 import signal
+import socket
 import subprocess
 import sys
+import time
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated
 
 import requests
-import toml
 import typer
 from dispatch_agents.models import TopicMessage
 
 from dispatch_cli.logger import get_logger
 from dispatch_cli.utils import LOCAL_ROUTER_PORT, LOCAL_ROUTER_URL
 
-from ..registry import get_agent_from_registry, list_agents_from_registry
+from ..registry import get_agent_from_registry
 
 router_app = typer.Typer(name="router", help="Multi-agent router management")
 
-DISPATCH_NETWORK = "dispatch-network"
-ROUTER_SERVICE_NAME = "dispatch-router"
-ROUTER_IMAGE_TAG = "dispatch-router:latest"
-DISPATCH_CLI_LABEL = "com.dispatch.cli=true"
-
 # Router tracking directory
 ROUTER_TRACKING_DIR = Path.home() / ".dispatch" / "routers"
+
+# Router log directory
+ROUTER_LOG_DIR = Path.home() / ".dispatch" / "logs"
 
 
 def get_router_tracking_file(port: int) -> Path:
     """Get the path to the router tracking file for a given port."""
     return ROUTER_TRACKING_DIR / f"{port}.json"
+
+
+def get_router_log_file(port: int) -> Path:
+    """Get the path to the router log file for a given port."""
+    return ROUTER_LOG_DIR / f"router-{port}.log"
 
 
 def register_router(port: int, pid: int) -> None:
@@ -97,6 +101,20 @@ def get_tracked_routers() -> list[dict]:
             continue
 
     return sorted(routers, key=lambda r: r.get("port", 0))
+
+
+def get_active_router() -> dict | None:
+    """Get the currently running router, if any.
+
+    Returns:
+        Router info dict with port, pid, started_at, running=True, or None.
+    """
+    routers = get_tracked_routers()
+    running = [r for r in routers if r.get("running")]
+    if not running:
+        return None
+    # Return the most recently started one
+    return max(running, key=lambda r: r.get("started_at", ""))
 
 
 def stop_router_by_port(port: int) -> tuple[bool, str]:
@@ -165,417 +183,229 @@ def stop_all_routers() -> list[tuple[int, bool, str]]:
     return results
 
 
-def get_sdk_path_from_pyproject() -> str | None:
-    """Extract SDK path from pyproject.toml if it exists."""
-    logger = get_logger()
-    cwd = os.getcwd()
-    logger.debug(cwd)
-    pyproject_path = os.path.join(cwd, "pyproject.toml")
-
-    if not os.path.exists(pyproject_path):
-        return None
-
-    try:
-        with open(pyproject_path) as f:
-            data = toml.load(f)
-
-        # Check for uv.sources first, then fall back to other source definitions
-        sources = data.get("tool", {}).get("uv", {}).get("sources", {})
-        if "dispatch-agents" in sources and "path" in sources["dispatch-agents"]:
-            sdk_path = sources["dispatch-agents"]["path"]
-            # Convert relative path to absolute
-            return os.path.abspath(os.path.join(cwd, sdk_path))
-
-        # Could add other source formats here if needed
-        return None
-    except Exception as e:
-        logger.warning(f"Could not parse pyproject.toml: {e}")
-        return None
-
-
 @router_app.command("start")
 def start_router(
-    force_rebuild: Annotated[
-        bool,
-        typer.Option(
-            help="Rebuild the router image and restart the container even if it's already running"
-        ),
-    ] = False,
     port: Annotated[
         int, typer.Option(help="Port to expose the router on")
     ] = LOCAL_ROUTER_PORT,
-    containerized: Annotated[
-        bool, typer.Option(help="Run the local router as a container")
-    ] = False,
 ):
-    """Start the multi-agent router and all registered agents."""
+    """Start the multi-agent router in the background."""
     logger = get_logger()
-    if containerized:
+
+    # Check if router is already running on this port
+    try:
+        resp = requests.get(f"{LOCAL_ROUTER_URL}:{port}/health", timeout=1.0)
+        resp.raise_for_status()
+        if resp.json().get("service") == "dispatch-local-router":
+            logger.success(f"Router is already running on port {port}")
+            logger.info("  • View logs: dispatch router logs")
+            logger.info(f"  • View local dashboard: {LOCAL_ROUTER_URL}:{port}")
+            return
+    except Exception:
+        logger.debug(f"No existing router found on port {port}, starting new one")
+
+    if not start_router_background(port=port):
+        raise typer.Exit(1)
+
+
+def _dump_router_log(logger, log_file_path: Path, label: str) -> None:
+    """Read the router log file and print its contents as error context."""
+    try:
+        content = log_file_path.read_text().strip()
+        if content:
+            logger.error(f"{label}:")
+            for line in content.splitlines()[-10:]:
+                logger.error(f"  {line}")
+    except OSError:
+        logger.debug(f"Could not read log file: {log_file_path}")
+
+
+def start_router_background(port: int = LOCAL_ROUTER_PORT) -> bool:
+    """Start the router as a background process, logging to a file.
+
+    Returns True if the router started successfully, False otherwise.
+    """
+    logger = get_logger()
+    router_service_py = (
+        os.path.dirname(os.path.dirname(__file__)) + "/router/service.py"
+    )
+    router_cmd = [
+        sys.executable,
+        router_service_py,
+        str(port),
+    ]
+
+    # Stop any existing router on a different port to enforce single-router
+    active = get_active_router()
+    if active and active["port"] != port:
+        old_port = active["port"]
+        logger.info(f"Stopping existing router on port {old_port}...")
+        stop_router_by_port(old_port)
+
+    # Check if something else is already using this port
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        if s.connect_ex(("localhost", port)) == 0:
+            logger.error(f"Port {port} is already in use")
+            logger.info(
+                f"Another process is listening on port {port}. "
+                f"Either stop it or use a different port: dispatch router start --port <port>"
+            )
+            return False
+
+    ROUTER_LOG_DIR.mkdir(parents=True, exist_ok=True)
+    log_file_path = get_router_log_file(port)
+    log_f = open(log_file_path, "w")
+
+    process = subprocess.Popen(
+        router_cmd,
+        stdout=log_f,
+        stderr=subprocess.STDOUT,
+        text=True,
+        start_new_session=True,
+    )
+
+    # Wait for the router to become healthy
+    max_wait = 10.0
+    poll_interval = 0.2
+    elapsed = 0.0
+    while elapsed < max_wait:
+        # Check if process died
+        if process.poll() is not None:
+            log_f.close()
+            exit_code = process.returncode
+            logger.error(f"Router process exited with code {exit_code}")
+            _dump_router_log(logger, log_file_path, "Router output")
+            return False
+
         try:
-            # 1. Create Docker network
-            logger.debug(f"Creating Docker network '{DISPATCH_NETWORK}'...")
-            network_result = subprocess.run(
-                ["docker", "network", "create", DISPATCH_NETWORK],
-                capture_output=True,
-                text=True,
-            )
-            if (
-                network_result.returncode != 0
-                and "already exists" not in network_result.stderr
-            ):
-                logger.error(f"Failed to create network: {network_result.stderr}")
-                raise typer.Exit(1)
-            elif "already exists" in network_result.stderr:
-                logger.success(f"Network '{DISPATCH_NETWORK}' already exists")
-            else:
-                logger.success(f"Created network '{DISPATCH_NETWORK}'")
+            resp = requests.get(f"{LOCAL_ROUTER_URL}:{port}/health", timeout=1.0)
+            resp.raise_for_status()
+            if resp.json().get("service") == "dispatch-local-router":
+                logger.success(
+                    f"Router started in background (port {port}, PID {process.pid})"
+                )
+                logger.info("  • View logs: dispatch router logs")
+                logger.info(f"  • View local dashboard: {LOCAL_ROUTER_URL}:{port}")
+                return True
+        except Exception:
+            logger.debug("Router not ready yet, retrying...")
 
-            # 2. Build and start router service
-            if force_rebuild:
-                logger.debug("Forcing router rebuild...")
-            else:
-                logger.debug("Starting router service...")
+        time.sleep(poll_interval)
+        elapsed += poll_interval
 
-            # Build router image with SSH agent forwarding from parent directory to include dispatch_cli
-            cli_root = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
-
-            # Check if local SDK is explicitly configured in pyproject.toml
-            sdk_root = get_sdk_path_from_pyproject()
-
-            if sdk_root and os.path.exists(sdk_root):
-                logger.success(f"Using local SDK from pyproject.toml: {sdk_root}")
-            else:
-                logger.debug("Using git installation (default)")
-                sdk_root = None
-
-            # Choose Dockerfile and build args based on SDK availability
-            router_dir = os.path.dirname(os.path.dirname(__file__)) + "/router"
-
-            if sdk_root:
-                # Use local Dockerfile with build context
-                router_dockerfile = router_dir + "/Dockerfile.local"
-                build_cmd = [
-                    "docker",
-                    "build",
-                    "--build-context",
-                    f"sdk={sdk_root}",
-                ]
-            else:
-                # Use git Dockerfile with SSH
-                router_dockerfile = router_dir + "/Dockerfile"
-                build_cmd = [
-                    "docker",
-                    "build",
-                    "--ssh",
-                    "default",
-                ]
-            if force_rebuild:
-                build_cmd.extend(["--pull", "--no-cache"])
-            build_cmd.extend(
-                [
-                    "-f",
-                    router_dockerfile,
-                    "-t",
-                    ROUTER_IMAGE_TAG,
-                    cli_root,
-                ]
-            )
-
-            build_result = subprocess.run(build_cmd, capture_output=True, text=True)
-            if build_result.returncode != 0:
-                logger.error(f"Failed to build router image: {build_result.stderr}")
-                raise typer.Exit(1)
-            logger.success(f"Built router image: {ROUTER_IMAGE_TAG}")
-
-            # Stop existing router if running
-            subprocess.run(
-                ["docker", "stop", ROUTER_SERVICE_NAME], capture_output=True, text=True
-            )
-            subprocess.run(
-                ["docker", "rm", ROUTER_SERVICE_NAME], capture_output=True, text=True
-            )
-
-            # Start router container
-            router_cmd = [
-                "docker",
-                "run",
-                "-d",
-                "--name",
-                ROUTER_SERVICE_NAME,
-                "--label",
-                DISPATCH_CLI_LABEL,
-                "--network",
-                DISPATCH_NETWORK,
-                "--network-alias",
-                "dispatch.api",  # Make accessible at dispatch.api for consistency with production
-                "-p",
-                f"{port}:8080",  # Expose router to host
-                "-v",
-                f"{os.path.expanduser('~')}/.dispatch_agents:/root/.dispatch_agents",  # Mount registry
-                ROUTER_IMAGE_TAG,
-            ]
-            router_result = subprocess.run(router_cmd, capture_output=True, text=True)
-            if router_result.returncode == 0:
-                container_id = router_result.stdout.strip()
-                logger.success(f"Started router service ({ROUTER_SERVICE_NAME})")
-                logger.info(f"    Container ID: {container_id[:12]}...")
-                logger.info(f"    Router URL: {LOCAL_ROUTER_URL}:{port}")
-            else:
-                logger.error(f"Failed to start router: {router_result.stderr}")
-                raise typer.Exit(1)
-        except Exception as e:
-            logger.error(f"Failed to start router: {e}")
-            raise typer.Exit(1)
-        logger.success("Router service starting")
-        logger.info("Next steps:")
-        logger.info(f"  • View local dashboard: {LOCAL_ROUTER_URL}:{port}")
-        return
-    else:  # non-containerized mode
-        router_service_py = (
-            os.path.dirname(os.path.dirname(__file__)) + "/router/service.py"
-        )
-        router_cmd = [
-            sys.executable,
-            router_service_py,
-            str(port),
-        ]
-        logger.success(f"Router service starting on port {port}")
-        logger.info("Next steps:")
-        logger.info(f"  • View local dashboard: {LOCAL_ROUTER_URL}:{port}")
-        subprocess.run(router_cmd, capture_output=False, text=True)
-    return
+    # Timed out — flush and show whatever we got
+    log_f.flush()
+    logger.error("Router failed to become healthy within 10s")
+    _dump_router_log(logger, log_file_path, "Router output")
+    logger.info("Full logs: dispatch router logs")
+    return False
 
 
 @router_app.command("stop")
-def stop_router(
-    port: Annotated[
-        int, typer.Option(help="Port to stop the router on")
-    ] = LOCAL_ROUTER_PORT,
-    all_routers: Annotated[
-        bool, typer.Option("--all", help="Stop all tracked routers")
-    ] = False,
-):
-    """Stop router service(s) and all dispatch-cli containers.
-
-    Use --all to stop all tracked routers, or --port to stop a specific one.
-    """
+def stop_router():
+    """Stop all running routers."""
     logger = get_logger()
     try:
-        if all_routers:
-            # Stop all tracked routers
-            results = stop_all_routers()
-            if not results:
-                logger.info("No tracked routers found")
-            else:
-                for r_port, success, message in results:
-                    if success:
-                        logger.success(message)
-                    else:
-                        logger.warning(message)
-                stopped = sum(1 for _, success, _ in results if success)
-                logger.success(f"Stopped {stopped}/{len(results)} router(s)")
+        results = stop_all_routers()
+        if not results:
+            logger.info("No running routers found")
         else:
-            # Stop specific router
-            success, message = stop_router_by_port(port)
-            if success:
-                logger.success(message)
-            else:
-                logger.warning(message)
-                raise typer.Exit(1)
-
-        # if docker daemon is not running, exit
-        if (
-            subprocess.run(["docker", "ps"], capture_output=True, text=True).returncode
-            != 0
-        ):
-            return
-
-        # Find all containers with dispatch-cli label
-        logger.debug("Finding all dispatch-cli containers...")
-        list_result = subprocess.run(
-            [
-                "docker",
-                "ps",
-                "-a",
-                "--filter",
-                f"label={DISPATCH_CLI_LABEL}",
-                "--format",
-                "{{.Names}}",
-            ],
-            capture_output=True,
-            text=True,
-        )
-
-        if list_result.returncode != 0:
-            logger.error(f"Failed to list containers: {list_result.stderr}")
-            raise typer.Exit(1)
-
-        container_names = [
-            name.strip()
-            for name in list_result.stdout.strip().split("\n")
-            if name.strip()
-        ]
-
-        if not container_names:
-            return
-
-        logger.debug(f"Found {len(container_names)} dispatch-cli container(s)")
-
-        # Stop and remove all containers
-        stopped_count = 0
-        for container_name in container_names:
-            stop_result = subprocess.run(
-                ["docker", "stop", container_name],
-                capture_output=True,
-                text=True,
-            )
-
-            if stop_result.returncode == 0:
-                logger.success(f"Stopped container: {container_name}")
-                stopped_count += 1
-            else:
-                logger.warning(f"Could not stop {container_name}: {stop_result.stderr}")
-
-            # Remove the container
-            subprocess.run(
-                ["docker", "rm", container_name],
-                capture_output=True,
-                text=True,
-            )
-
-        logger.success(
-            f"Stopped and removed {stopped_count}/{len(container_names)} dispatch-cli container(s)"
-        )
+            for _, success, message in results:
+                if success:
+                    logger.success(message)
+                else:
+                    logger.warning(message)
 
     except Exception as e:
         logger.error(f"Failed to stop: {e}")
         raise typer.Exit(1)
 
 
-@router_app.command("list")
-def list_routers():
-    """List all tracked local routers."""
+@router_app.command("status")
+def router_status():
+    """Show the status of the local router."""
     logger = get_logger()
-    routers = get_tracked_routers()
+    active = get_active_router()
 
-    if not routers:
-        logger.info("No tracked routers found")
-        logger.info("Start a router with: dispatch router start")
+    if not active:
+        logger.info("No router running")
+        logger.info("Start one with: dispatch router start")
         return
 
-    logger.info(f"Found {len(routers)} tracked router(s):")
-    for router in routers:
-        port = router.get("port", "?")
-        pid = router.get("pid", "?")
-        started_at = router.get("started_at", "?")
-        running = router.get("running", False)
-        status = "running" if running else "stopped"
-        status_icon = "✓" if running else "✗"
+    port = active.get("port", "?")
+    pid = active.get("pid", "?")
+    started_at = active.get("started_at", "?")
 
-        logger.info(f"  {status_icon} Port {port} (PID {pid}) - {status}")
-        logger.info(f"      Started: {started_at}")
-
-    # Clean up stale entries
-    stale_count = sum(1 for r in routers if not r.get("running", False))
-    if stale_count > 0:
-        logger.warning(
-            f"\n{stale_count} stale entry(ies) found. Run 'dispatch router stop --all' to clean up."
-        )
+    logger.success(f"Router running on port {port} (PID {pid})")
+    logger.info(f"  Started: {started_at}")
+    logger.info(f"  Dashboard: {LOCAL_ROUTER_URL}:{port}")
+    logger.info("  Logs: dispatch router logs")
 
 
-# @router_app.command("status")
-def router_status(
-    port: Annotated[
-        int, typer.Option(help="Port to check the router on")
-    ] = LOCAL_ROUTER_PORT,
-):
-    """Show router and agent container status."""
+def _resolve_router_log_file() -> Path:
+    """Find the most recent router log file.
+
+    Prefers logs from running routers, falls back to most recently modified.
+    """
     logger = get_logger()
-    try:
-        # Check Docker network
-        network_result = subprocess.run(
-            ["docker", "network", "inspect", DISPATCH_NETWORK],
-            capture_output=True,
-            text=True,
-        )
 
-        if network_result.returncode == 0:
-            logger.success(f"Network '{DISPATCH_NETWORK}' exists")
-            network_info = json.loads(network_result.stdout)[0]
-            containers = network_info.get("Containers", {})
-            logger.info(f"  Connected containers: {len(containers)}")
-        else:
-            logger.error(f"Network '{DISPATCH_NETWORK}' not found")
-            logger.info("Run 'dispatch router start' to create the network")
-
-        # Check router service status
-        logger.info("\nRouter Service:")
-        router_inspect_result = subprocess.run(
-            ["docker", "inspect", ROUTER_SERVICE_NAME, "--format", "{{.State.Status}}"],
-            capture_output=True,
-            text=True,
-        )
-
-        if router_inspect_result.returncode == 0:
-            status = router_inspect_result.stdout.strip()
-            if status == "running":
-                logger.info(f"  {ROUTER_SERVICE_NAME} - {status}")
-                logger.info(f"      API URL: {LOCAL_ROUTER_URL}:{port}")
-                logger.info(f"      Docs: {LOCAL_ROUTER_URL}:{port}/docs")
-            else:
-                logger.warning(f"  {ROUTER_SERVICE_NAME} - {status}")
-        else:
-            logger.warning(f"  {ROUTER_SERVICE_NAME} - not found")
-            logger.info("  Run 'dispatch router start' to start the router service")
-
-        # Check registered agents and their container status
-        agents = list_agents_from_registry()
-        if not agents:
-            logger.warning("No agents registered")
-            return
-
-        logger.info(f"\nAgent Container Status ({len(agents)} registered):")
-
-        running_count = 0
-        for agent in agents:
-            # Check if container is running
-            inspect_result = subprocess.run(
-                [
-                    "docker",
-                    "inspect",
-                    agent.name,
-                    "--format",
-                    "{{.State.Status}}",
-                ],
-                capture_output=True,
-                text=True,
-            )
-
-            if inspect_result.returncode == 0:
-                status = inspect_result.stdout.strip()
-                if status == "running":
-                    logger.success(
-                        f"  {agent.name} (dispatchagents-{agent.name}) - {status}"
-                    )
-                    logger.info(f"      URL: {agent.get_network_url()}")
-                    running_count += 1
-                else:
-                    logger.warning(
-                        f"  {agent.name} (dispatchagents-{agent.name}) - {status}"
-                    )
-            else:
-                logger.debug(
-                    f"  {agent.name} (dispatchagents-{agent.name}) - not found"
-                )
-
-        logger.info(f"\nSummary: {running_count}/{len(agents)} agents running")
-
-        if running_count == 0:
-            logger.info("\nTo start all agents: dispatch router start")
-
-    except Exception as e:
-        logger.error(f"Failed to check router status: {e}")
+    if not ROUTER_LOG_DIR.exists():
+        logger.error("No router logs found")
+        logger.info("Start a router with: dispatch router start")
         raise typer.Exit(1)
+
+    log_files = list(ROUTER_LOG_DIR.glob("router-*.log"))
+    if not log_files:
+        logger.error("No router logs found")
+        logger.info("Start a router with: dispatch router start")
+        raise typer.Exit(1)
+
+    # Prefer the running router's log, otherwise most recently modified
+    active = get_active_router()
+    if active:
+        active_log = get_router_log_file(active["port"])
+        if active_log.exists():
+            return active_log
+
+    return max(log_files, key=lambda f: f.stat().st_mtime)
+
+
+@router_app.command("logs")
+def router_logs(
+    follow: Annotated[
+        bool, typer.Option("--follow", "-f", help="Follow log output in real-time")
+    ] = False,
+    tail: Annotated[
+        int, typer.Option(help="Number of lines to show from the end of the log")
+    ] = 100,
+):
+    """View router logs."""
+    log_file = _resolve_router_log_file()
+
+    if follow:
+        # Tail -f style: print last N lines then follow
+        try:
+            with open(log_file) as f:
+                # Read existing lines and print the last `tail` lines
+                lines = f.readlines()
+                for line in lines[-tail:]:
+                    print(line, end="")
+
+                # Follow new output
+                while True:
+                    line = f.readline()
+                    if line:
+                        print(line, end="")
+                    else:
+                        time.sleep(0.1)
+        except KeyboardInterrupt:
+            pass
+    else:
+        # Print last N lines
+        with open(log_file) as f:
+            lines = f.readlines()
+            for line in lines[-tail:]:
+                print(line, end="")
 
 
 @router_app.command("test")
@@ -657,10 +487,9 @@ def test_topic(
                 logger.info(json.dumps(result, indent=2))
 
             except requests.exceptions.ConnectionError:
-                logger.error("Connection failed - is the agent container running?")
+                logger.error("Connection failed - is the agent running?")
                 logger.info("Try:")
                 logger.info("  dispatch router status")
-                logger.info("  dispatch router start")
                 raise typer.Exit(1)
             except requests.exceptions.Timeout:
                 logger.error(f"Request timed out after {timeout}s")
@@ -720,7 +549,6 @@ def test_topic(
                 logger.error("Connection failed - is the router service running?")
                 logger.info("Try:")
                 logger.info("  dispatch router status")
-                logger.info("  dispatch router start")
                 raise typer.Exit(1)
             except requests.exceptions.Timeout:
                 logger.error(f"Request timed out after {timeout}s")

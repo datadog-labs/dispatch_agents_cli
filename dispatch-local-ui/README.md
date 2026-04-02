@@ -15,14 +15,14 @@ The CLI serves a simple, static Local UI (HTML/CSS/JS) for managing agents local
 
 ```bash
 cd cli/dispatch-local-ui
-npm install
+npm install --min-release-age=30
 npm run dev              # Development server at http://localhost:3001
 ```
 
 For CLI testing:
 ```bash
 npm run deploy-update   # Build + reinstall CLI
-dispatch router start   # Test with router
+dispatch router start   # Start router in background
 ```
 
 ## Development
@@ -36,6 +36,7 @@ dispatch router start   # Test with router
 1. **Develop** - `npm run dev`
 2. **Deploy** - `npm run deploy-update`
 3. **Test** - `dispatch router start`
+4. **Logs** - `dispatch router logs --follow`
 
 ## Architecture
 
