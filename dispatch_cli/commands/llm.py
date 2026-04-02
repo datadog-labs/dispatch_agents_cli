@@ -1,6 +1,5 @@
 """LLM configuration and testing commands."""
 
-import getpass
 import os
 from typing import Annotated, Any
 
@@ -19,10 +18,6 @@ from .secrets import get_namespace_from_config
 PROVIDER_ENV_VARS = {
     "openai": "OPENAI_API_KEY",
     "anthropic": "ANTHROPIC_API_KEY",
-    "azure_openai": "AZURE_OPENAI_API_KEY",
-    "google": "GOOGLE_API_KEY",
-    "cohere": "COHERE_API_KEY",
-    "mistral": "MISTRAL_API_KEY",
 }
 
 llm_app = typer.Typer(
@@ -31,14 +26,14 @@ llm_app = typer.Typer(
     rich_markup_mode="markdown",
 )
 
-# Valid LLM providers
-VALID_PROVIDERS = ["openai", "anthropic", "azure_openai", "google", "cohere", "mistral"]
+# Valid provider formats
+VALID_PROVIDER_FORMATS = ["openai", "anthropic"]
 
 # Default models per provider
 DEFAULT_MODELS = {
-    "openai": "gpt-4.1",
+    "openai": "gpt-5",
     "anthropic": "claude-sonnet-4-5-20250929",
-    "azure_openai": "gpt-4.1",
+    "azure_openai": "gpt-5",
     "google": "gemini-2.0-flash",
     "cohere": "command-r-plus",
     "mistral": "mistral-large-latest",
@@ -172,7 +167,7 @@ def configure_provider(
     provider: Annotated[
         str,
         typer.Argument(
-            help=f"LLM provider to configure. Options: {', '.join(VALID_PROVIDERS)}"
+            help=f"LLM provider to configure. Options: {', '.join(VALID_PROVIDER_FORMATS)}"
         ),
     ],
     api_key: Annotated[
@@ -220,9 +215,9 @@ def configure_provider(
     """
     logger = get_logger()
 
-    if provider not in VALID_PROVIDERS:
+    if provider not in VALID_PROVIDER_FORMATS:
         logger.error(f"Invalid provider '{provider}'")
-        logger.info(f"Valid providers: {', '.join(VALID_PROVIDERS)}")
+        logger.info(f"Valid providers: {', '.join(VALID_PROVIDER_FORMATS)}")
         raise typer.Exit(1)
 
     resolved_namespace = _resolve_namespace(namespace, logger)
@@ -237,10 +232,10 @@ def configure_provider(
             api_key = (
                 api_key_env
                 if use_env
-                else typer.prompt(f"Enter your {provider} API key", hide_input=True)
+                else questionary.password(f"Enter your {provider} API key:").ask()
             )
         else:
-            api_key = typer.prompt(f"Enter your {provider} API key", hide_input=True)
+            api_key = questionary.password(f"Enter your {provider} API key:").ask()
 
     if not api_key or not api_key.strip():
         logger.error("API key cannot be empty")
@@ -267,7 +262,8 @@ def configure_provider(
                 "default_model": model,
                 "scope": "org",
                 "set_default": set_default,
-                "allow_overwrite": True,
+                "allow_overwrite": False,
+                "base_provider": provider,
             },
             headers=auth_headers,
             timeout=30,
@@ -284,6 +280,8 @@ def configure_provider(
                     "default_model": model,
                     "scope": "org",
                     "set_default": set_default,
+                    "allow_overwrite": False,
+                    "base_provider": provider,
                 },
                 headers=auth_headers,
                 timeout=30,
@@ -616,15 +614,23 @@ def _try_validate_key(
     provider: str,
     namespace: str,
     auth_headers: dict[str, str],
+    base_provider: str | None = None,
+    base_url: str | None = None,
 ) -> bool | None:
     """Validate an API key against the backend. Returns True/False, or None if unreachable."""
     log = get_logger()
+    payload: dict[str, Any] = {
+        "api_key": api_key,
+        "base_provider": base_provider or provider,
+    }
+    if base_url:
+        payload["base_url"] = base_url
     try:
         resp = requests.post(
             build_namespaced_url(
                 f"/llm-config/providers/{provider}/validate", namespace
             ),
-            json={"api_key": api_key},
+            json=payload,
             headers=auth_headers,
             timeout=15,
         )
@@ -641,12 +647,16 @@ def _validate_api_key_with_retry(
     provider: str,
     namespace: str,
     auth_headers: dict[str, str],
+    base_provider: str | None = None,
+    base_url: str | None = None,
 ) -> str:
     """Validate an API key, offering one retry on failure. Returns the (possibly new) key."""
 
     log = get_logger()
 
-    valid = _try_validate_key(api_key, provider, namespace, auth_headers)
+    valid = _try_validate_key(
+        api_key, provider, namespace, auth_headers, base_provider, base_url
+    )
     if valid is None:
         return api_key  # Backend unreachable, proceed
     if valid:
@@ -667,7 +677,9 @@ def _validate_api_key_with_retry(
         raise typer.Exit(1)
     new_key = new_key.strip()
 
-    retry_valid = _try_validate_key(new_key, provider, namespace, auth_headers)
+    retry_valid = _try_validate_key(
+        new_key, provider, namespace, auth_headers, base_provider, base_url
+    )
     if retry_valid:
         log.success("API key validated successfully")
     elif retry_valid is False:
@@ -680,7 +692,7 @@ def setup_wizard(
     provider: Annotated[
         str | None,
         typer.Argument(
-            help=f"LLM provider to configure. Options: {', '.join(VALID_PROVIDERS)}",
+            help="LLM provider to configure (e.g., openai, anthropic, or a custom name)",
         ),
     ] = None,
     namespace: Annotated[
@@ -706,29 +718,53 @@ def setup_wizard(
     logger.info("\n[bold]Welcome to Dispatch LLM Setup![/bold]\n")
 
     # Step 1: Select provider
+    is_custom = False
+    custom_base_provider: str | None = None
+    custom_base_url: str | None = None
+
     if not provider:
         provider = questionary.select(
             "Which provider would you like to configure?",
             choices=[
                 *SETUP_WIZARD_PROVIDERS,
-                questionary.Choice("Other", value="_other"),
+                questionary.Choice("Custom provider", value="_custom"),
             ],
             default="openai",
         ).ask()
         if not provider:
             raise typer.Exit(1)
-        if provider == "_other":
-            provider = questionary.text(
-                f"Enter provider name ({', '.join(VALID_PROVIDERS)}):"
-            ).ask()
-            if not provider:
-                raise typer.Exit(1)
-            provider = provider.strip().lower()
 
-    if provider not in VALID_PROVIDERS:
-        logger.error(f"Invalid provider '{provider}'")
-        logger.info(f"Valid providers: {', '.join(VALID_PROVIDERS)}")
-        raise typer.Exit(1)
+    if provider == "_custom":
+        provider = questionary.text(
+            "Provider name (e.g., 'my-vllm-server', 'together-ai'):"
+        ).ask()
+        if not provider:
+            raise typer.Exit(1)
+        provider = provider.strip().lower()
+        is_custom = True
+
+    if provider not in VALID_PROVIDER_FORMATS:
+        is_custom = True
+
+    if is_custom:
+        custom_base_provider = questionary.select(
+            "API format (how does this provider accept requests)?",
+            choices=[
+                questionary.Choice("OpenAI-compatible", value="openai"),
+                questionary.Choice("Anthropic-compatible", value="anthropic"),
+            ],
+            default="openai",
+        ).ask()
+        if not custom_base_provider:
+            raise typer.Exit(1)
+
+        custom_base_url = questionary.text(
+            "Base URL (everything before /v1, e.g., https://api.together.xyz):"
+        ).ask()
+        if not custom_base_url or not custom_base_url.strip():
+            logger.error("Base URL is required for custom providers")
+            raise typer.Exit(1)
+        custom_base_url = custom_base_url.strip().rstrip("/")
 
     # Step 2: Where should the key be available?
     storage = questionary.select(
@@ -808,23 +844,31 @@ def setup_wizard(
         except Exception:
             pass
 
-        # Model selection with popular choices + custom option
+        # Model selection
         models = POPULAR_MODELS.get(provider, [])
-        default_model = DEFAULT_MODELS.get(provider, "")
-        model_choices = [questionary.Choice(m, value=m) for m in models]
-        model_choices.append(
-            questionary.Choice("Other (enter manually)", value="_other")
-        )
+        if models:
+            default_model = DEFAULT_MODELS.get(provider, "")
+            model_choices = [questionary.Choice(m, value=m) for m in models]
+            model_choices.append(
+                questionary.Choice("Other (enter manually)", value="_other")
+            )
 
-        model = questionary.select(
-            "Default model:",
-            choices=model_choices,
-            default=default_model if default_model in models else None,
-        ).ask()
-        if not model:
-            raise typer.Exit(1)
-        if model == "_other":
-            model = questionary.text("Enter model name:").ask()
+            model = questionary.select(
+                "Default model:",
+                choices=model_choices,
+                default=default_model if default_model in models else None,
+            ).ask()
+            if not model:
+                raise typer.Exit(1)
+            if model == "_other":
+                model = questionary.text("Enter model name:").ask()
+                if not model or not model.strip():
+                    logger.error("Model name cannot be empty")
+                    raise typer.Exit(1)
+                model = model.strip()
+        else:
+            # Custom provider — no preset list, just ask
+            model = questionary.text("Default model name:").ask()
             if not model or not model.strip():
                 logger.error("Model name cannot be empty")
                 raise typer.Exit(1)
@@ -861,7 +905,12 @@ def setup_wizard(
     # Validate API key before saving
     if store_remote and resolved_namespace:
         api_key = _validate_api_key_with_retry(
-            api_key, provider, resolved_namespace, auth_headers
+            api_key,
+            provider,
+            resolved_namespace,
+            auth_headers,
+            base_provider=custom_base_provider,
+            base_url=custom_base_url,
         )
 
     logger.info("")
@@ -882,18 +931,23 @@ def setup_wizard(
     # Execute: store remotely via /setup endpoint
     if store_remote:
         assert resolved_namespace is not None
+        setup_payload: dict[str, Any] = {
+            "api_key": api_key,
+            "default_model": model,
+            "scope": remote_scope,
+            "set_default": set_default,
+            "allow_overwrite": False,
+            "base_provider": custom_base_provider if is_custom else provider,
+        }
+        if custom_base_url:
+            setup_payload["base_url"] = custom_base_url
+
         try:
             response = requests.post(
                 build_namespaced_url(
                     f"/llm-config/providers/{provider}/setup", resolved_namespace
                 ),
-                json={
-                    "api_key": api_key,
-                    "default_model": model,
-                    "scope": remote_scope,
-                    "set_default": set_default,
-                    "allow_overwrite": True,
-                },
+                json=setup_payload,
                 headers=auth_headers,
                 timeout=30,
             )
@@ -905,12 +959,7 @@ def setup_wizard(
                         f"/llm-config/providers/{provider}/setup",
                         resolved_namespace,
                     ),
-                    json={
-                        "api_key": api_key,
-                        "default_model": model,
-                        "scope": remote_scope,
-                        "set_default": set_default,
-                    },
+                    json=setup_payload,
                     headers=auth_headers,
                     timeout=30,
                 )
@@ -933,6 +982,9 @@ def setup_wizard(
     logger.info("─" * 50)
     logger.success("LLM setup complete! Here's your configuration:\n")
     logger.info(f"  Provider:   {provider}")
+    if is_custom:
+        logger.info(f"  Format:     {custom_base_provider}-compatible")
+        logger.info(f"  Base URL:   {custom_base_url}")
     if store_local:
         logger.info(f"  Local dev:  {env_var} (stored)")
     if store_remote:
@@ -961,7 +1013,7 @@ def local_provider(
     provider: Annotated[
         str,
         typer.Argument(
-            help=f"LLM provider to configure locally. Options: {', '.join(VALID_PROVIDERS)}"
+            help=f"LLM provider to configure locally. Options: {', '.join(VALID_PROVIDER_FORMATS)}"
         ),
     ],
 ):
@@ -976,9 +1028,9 @@ def local_provider(
     """
     logger = get_logger()
 
-    if provider not in VALID_PROVIDERS:
+    if provider not in VALID_PROVIDER_FORMATS:
         logger.error(f"Invalid provider '{provider}'")
-        logger.info(f"Valid providers: {', '.join(VALID_PROVIDERS)}")
+        logger.info(f"Valid providers: {', '.join(VALID_PROVIDER_FORMATS)}")
         raise typer.Exit(1)
 
     env_var = PROVIDER_ENV_VARS.get(provider, f"{provider.upper()}_API_KEY")
@@ -990,10 +1042,10 @@ def local_provider(
         api_key = (
             api_key_env
             if use_env
-            else getpass.getpass(f"Enter your {provider} API key: ")
+            else questionary.password(f"Enter your {provider} API key:").ask()
         )
     else:
-        api_key = getpass.getpass(f"Enter your {provider} API key: ")
+        api_key = questionary.password(f"Enter your {provider} API key:").ask()
 
     if not api_key or not api_key.strip():
         logger.error("API key cannot be empty")

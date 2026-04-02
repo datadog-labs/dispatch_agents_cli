@@ -15,17 +15,21 @@ Run `dispatch version` to check if the CLI is installed. If it fails or is not f
 uv tool install git+ssh://git@github.com/datadog-labs/dispatch_agents_cli.git --upgrade
 ```
 
-After installation, verify with `dispatch version`.
+### Authenticate
 
-### Check Authentication
-
-Run `dispatch auth status` to check if the user is authenticated. If not authenticated:
-
-1. The user needs a Dispatch API key. They can create one at the Dispatch dashboard.
-2. Run `dispatch login` to authenticate (prompts for API key and stores it in the system keychain).
-3. Verify with `dispatch auth status`.
+Run `dispatch login` to store an API key. The user needs a Dispatch API key from the Dispatch dashboard. The key is stored securely in the system keychain.
 
 If the user already has a `DISPATCH_API_KEY` environment variable set, that works too — the CLI will use it automatically.
+
+### Set Up LLM Providers for Local Dev
+
+If the agent will use LLM features (`llm.chat()` or Claude Agent SDK), run the interactive setup wizard:
+
+```bash
+dispatch llm setup
+```
+
+This walks through configuring API keys for local development. Keys are stored in the macOS Keychain and used by the local router's LLM gateway.
 
 Once the CLI is installed and authenticated, proceed to Step 1.
 
@@ -41,17 +45,10 @@ Parameters:
   description: <what the agent does>
 ```
 
-If MCP tools are unavailable, fall back to the CLI:
-
-```bash
-dispatch agent init <agent-name> --description "<what the agent does>"
-```
-
 This creates a directory with:
 - `agent.py` — the main entrypoint with handler functions
 - `dispatch.yaml` — deployment configuration
 - `pyproject.toml` — Python dependencies
-- `requirements.txt` — pinned dependencies (auto-generated)
 
 ## Step 2: Write Handler Functions
 
@@ -139,7 +136,55 @@ async def on_pr_review_comment(event: PullRequestReviewCommentCreated) -> None:
 5. **Handler names must be unique** across the agent.
 6. **`ValueError`** = non-retryable error. **`OSError`** = retryable error.
 
-## Step 3: Add Dependencies
+## Step 3: Using LLMs in Your Agent
+
+You can use any LLM framework you like — the Dispatch LLM Gateway proxies requests so your agent doesn't need to manage API keys directly. The gateway sets standard environment variables (`OPENAI_BASE_URL`, `ANTHROPIC_BASE_URL`) that most SDKs pick up automatically.
+
+If you don't have a preference, here are two good defaults:
+
+### Simple LLM calls: `dispatch_agents.llm`
+
+For straightforward prompt-in, text-out patterns (chat completion, summarization, classification):
+
+```python
+from dispatch_agents import llm
+
+response = await llm.chat(
+    messages=[
+        {"role": "system", "content": "You are a helpful assistant."},
+        {"role": "user", "content": payload.query},
+    ],
+)
+reply = response.choices[0].message.content
+```
+
+### Agentic workflows: Claude Agent SDK
+
+For agents that need tool calling, MCP server connections, web browsing, file creation, or multi-step reasoning:
+
+```python
+from claude_agent_sdk import ClaudeAgentOptions, ResultMessage, query
+
+options = ClaudeAgentOptions(
+    model="claude-sonnet-4-20250514",
+    system_prompt="You are a research analyst.",
+    tools=["WebSearch", "WebFetch"],
+)
+
+result: ResultMessage = await query(
+    prompt=payload.query,
+    options=options,
+)
+```
+
+Install as a dependency:
+
+```bash
+cd <agent-directory>
+uv add claude-agent-sdk
+```
+
+## Step 4: Add Dependencies
 
 ### Python packages
 
@@ -162,22 +207,40 @@ system_packages:
 
 ### Secrets
 
-To inject secrets as environment variables, add them in `dispatch.yaml`:
+For secrets your agent needs at runtime (database URLs, third-party API keys, etc.):
+
+1. **Add to `dispatch.yaml`** so Dispatch knows about them:
 
 ```yaml
 secrets:
-  - name: OPENAI_API_KEY
-    secret_id: /shared/openai-api-key
+  - name: MY_API_KEY
+    secret_id: /my-agent/api-key
 ```
 
-Then access in your agent code:
+2. **Create a `.env` file** in the agent directory for local development:
+
+```
+MY_API_KEY=sk-...
+```
+
+The `.env` file is automatically loaded by `dispatch agent dev`. Access secrets as environment variables in your code:
 
 ```python
 import os
-api_key = os.environ["OPENAI_API_KEY"]
+api_key = os.environ["MY_API_KEY"]
 ```
 
-## Step 4: Use Memory APIs (Optional)
+3. **Upload to production** before deploying — run this from the agent directory:
+
+```bash
+dispatch secret manage --upload
+```
+
+This reads values from `.env`, checks what's already uploaded, and prompts before overwriting.
+
+**Important:** Do NOT add LLM provider API keys (OPENAI_API_KEY, ANTHROPIC_API_KEY) as agent secrets. These are handled automatically by the LLM Gateway — configure them with `dispatch llm local` for local dev, or `dispatch llm configure` for production.
+
+## Step 5: Use Memory APIs (Optional)
 
 Dispatch provides three types of persistent memory. Import the singleton client:
 
@@ -220,7 +283,7 @@ await memory.short_term.delete(session_id="sess-123")
 
 **Note:** Memory APIs require the backend to be running. In local dev mode, use persistent storage (`volumes`) for file-based persistence instead.
 
-## Step 5: Use Persistent Storage (Optional)
+## Step 6: Use Persistent Storage (Optional)
 
 For file-based persistence, configure a volume in `dispatch.yaml`:
 
@@ -243,9 +306,9 @@ my_file.write_text('{"count": 0}')
 
 `get_data_dir()` returns `/data` in production (EFS mount) and a local mock directory during `dispatch agent dev`.
 
-## Step 6: Test Locally
+## Step 7: Test Locally
 
-Use the MCP `start_local_agent_dev` tool to start a local router and agent worker:
+Use the MCP `start_local_agent_dev` tool to start the agent in dev mode:
 
 ```
 Tool: start_local_agent_dev
@@ -253,14 +316,7 @@ Parameters:
   agent_directory: <path to agent directory>
 ```
 
-If MCP tools are unavailable, fall back to the CLI:
-
-```bash
-cd <agent-directory>
-dispatch agent dev --reload
-```
-
-(`--reload` allows it to auto-reboot when the agent source code is changed)
+This automatically starts the local router if it isn't already running.
 
 ### Invoke a `@fn()` function locally
 
@@ -272,12 +328,6 @@ Parameters:
   agent_directory: <path to agent directory>
   function_name: "my_function"
   payload: {"query": "hello"}
-```
-
-Or with the CLI:
-
-```bash
-dispatch agent invoke my_function --payload '{"query": "hello"}'
 ```
 
 ### Send a test event to a `@on()` handler locally
@@ -310,27 +360,20 @@ When done testing, stop the local router:
 Tool: stop_local_router
 ```
 
-Or with the CLI:
+## Step 8: Deploy
+
+If the agent uses secrets, make sure they're uploaded first (from the agent directory):
 
 ```bash
-# Ctrl+C in the terminal running `dispatch agent dev`
+dispatch secret manage --upload
 ```
 
-## Step 7: Deploy
-
-Use the MCP `deploy_agent` tool:
+Then deploy using the MCP `deploy_agent` tool:
 
 ```
 Tool: deploy_agent
 Parameters:
   agent_directory: <path to agent directory>
-```
-
-If MCP tools are unavailable, fall back to the CLI:
-
-```bash
-cd <agent-directory>
-dispatch agent deploy
 ```
 
 After deployment, invoke the agent remotely:
@@ -364,42 +407,43 @@ Make sure all Python dependencies are in `pyproject.toml` (use `uv add <package>
 
 ### Local dev not receiving events
 
-Make sure the local router is running (`start_local_agent_dev` or `dispatch agent dev`). Check logs with `read_local_agent_logs` for errors.
+Make sure the local router is running (`start_local_agent_dev` or `dispatch agent dev` will start it automatically). Check agent logs with `read_local_agent_logs` for errors, or run `dispatch router logs` for router-level issues.
+
+### LLM calls failing locally
+
+Make sure you've configured LLM provider API keys for local dev:
+
+```bash
+dispatch llm setup
+```
+
+Then restart the router (`dispatch router stop && dispatch router start`).
 
 ## Complete Example
 
-Here is a minimal working agent:
+Here is a minimal working agent using `llm.chat()`:
 
 ```python
 """My first Dispatch agent."""
 
-from dispatch_agents import BasePayload, fn, on, emit_event, invoke
+from dispatch_agents import BasePayload, fn, llm
 
-# --- Direct function (callable by name) ---
+class AskRequest(BasePayload):
+    question: str
 
-class GreetRequest(BasePayload):
-    name: str
-
-class GreetResponse(BasePayload):
-    message: str
+class AskResponse(BasePayload):
+    answer: str
 
 @fn()
-async def greet(payload: GreetRequest) -> GreetResponse:
-    """Greet someone by name."""
-    return GreetResponse(message=f"Hello, {payload.name}!")
-
-# --- Topic subscriber (event-driven) ---
-
-class TaskPayload(BasePayload):
-    task_id: str
-    description: str
-
-@on(topic="tasks.created")
-async def handle_task(payload: TaskPayload) -> None:
-    """React to new task events."""
-    print(f"New task {payload.task_id}: {payload.description}")
-    # Optionally emit another event
-    await emit_event("tasks.processed", {"task_id": payload.task_id, "status": "done"})
+async def ask(payload: AskRequest) -> AskResponse:
+    """Answer a question using an LLM."""
+    response = await llm.chat(
+        messages=[
+            {"role": "system", "content": "You are a helpful assistant. Be concise."},
+            {"role": "user", "content": payload.question},
+        ],
+    )
+    return AskResponse(answer=response.choices[0].message.content)
 ```
 
 With `dispatch.yaml`:
@@ -408,6 +452,5 @@ With `dispatch.yaml`:
 namespace: my-namespace
 entrypoint: agent.py
 base_image: python:3.13-slim
-system_packages: []
 agent_name: my-agent
 ```

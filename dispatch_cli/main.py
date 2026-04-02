@@ -2,6 +2,7 @@
 
 from importlib.metadata import version as _version
 
+import questionary
 import typer
 
 from .commands.agent import agent_app
@@ -100,7 +101,10 @@ def login(
         logger.info(
             f"You can create one at: [link={DISPATCH_API_BASE}/manage/api-keys]{DISPATCH_API_BASE}/manage/api-keys[/link]\n"
         )
-        api_key = typer.prompt("API Key", hide_input=True)
+        api_key = questionary.password("API Key:").ask()
+        if not api_key:
+            logger.error("API key cannot be empty")
+            raise typer.Exit(1)
 
     api_key = api_key.strip()
 

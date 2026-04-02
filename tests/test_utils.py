@@ -171,10 +171,8 @@ class TestValidateDispatchProject:
             with open(os.path.join(tmpdir, "pyproject.toml"), "w") as f:
                 f.write("[tool.dispatch]\nentrypoint = 'agent.py'\n")
             # create the dispatch.yaml file (required by validate_dispatch_project)
-            with open(os.path.join(tmpdir, ".dispatch.yaml"), "w") as f:
+            with open(os.path.join(tmpdir, "dispatch.yaml"), "w") as f:
                 f.write("entrypoint: agent.py\nnamespace: test\n")
-            # create the Dockerfile file
-            Path(os.path.join(dispatch_dir, "Dockerfile")).touch()
             # create the agent.py file
             with open(os.path.join(tmpdir, "agent.py"), "w") as f:
                 f.write(

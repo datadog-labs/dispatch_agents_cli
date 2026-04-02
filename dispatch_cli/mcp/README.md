@@ -20,14 +20,14 @@ AI clients (like Claude) automatically receive these instructions when connectin
 
 To inspect the MCP server locally, run this command:
 ```bash
-npx @modelcontextprotocol/inspector \
+npx --min-release-age=30 @modelcontextprotocol/inspector \
   --config $(git rev-parse --show-toplevel)/.mcp.json \
   --server dispatch-operator-localhost
 ```
 
 You can also list tools directly in your terminal, e.g.
 ```bash
-npx @modelcontextprotocol/inspector \
+npx --min-release-age=30 @modelcontextprotocol/inspector \
   --config $(git rev-parse --show-toplevel)/.mcp.json \
   --server dispatch-operator-localhost \
   --cli --method tools/list \
@@ -36,7 +36,7 @@ npx @modelcontextprotocol/inspector \
 
 You can also invoke tools (e.g. to create an agent):
 ```bash
-npx @modelcontextprotocol/inspector \
+npx --min-release-age=30 @modelcontextprotocol/inspector \
   --config $(git rev-parse --show-toplevel)/.mcp.json \
   --server dispatch-operator-localhost \
   --cli --method tools/call \
@@ -52,7 +52,7 @@ The operator MCP server includes tools for local development and testing:
 
 #### Stop Local Router
 ```bash
-npx @modelcontextprotocol/inspector \
+npx --min-release-age=30 @modelcontextprotocol/inspector \
   --config $(git rev-parse --show-toplevel)/.mcp.json \
   --server dispatch-operator-localhost \
   --cli --method tools/call \
@@ -62,7 +62,7 @@ npx @modelcontextprotocol/inspector \
 
 #### Send Test Event to Local Router
 ```bash
-npx @modelcontextprotocol/inspector \
+npx --min-release-age=30 @modelcontextprotocol/inspector \
   --config $(git rev-parse --show-toplevel)/.mcp.json \
   --server dispatch-operator-localhost \
   --cli --method tools/call \
@@ -72,7 +72,7 @@ npx @modelcontextprotocol/inspector \
 
 #### Start Agent in Dev Mode
 ```bash
-npx @modelcontextprotocol/inspector \
+npx --min-release-age=30 @modelcontextprotocol/inspector \
   --config $(git rev-parse --show-toplevel)/.mcp.json \
   --server dispatch-operator-localhost \
   --cli --method tools/call \
@@ -82,7 +82,7 @@ npx @modelcontextprotocol/inspector \
 
 #### Read Local Agent Logs
 ```bash
-npx @modelcontextprotocol/inspector \
+npx --min-release-age=30 @modelcontextprotocol/inspector \
   --config $(git rev-parse --show-toplevel)/.mcp.json \
   --server dispatch-operator-localhost \
   --cli --method tools/call \
@@ -97,7 +97,7 @@ The operator MCP server includes helpful prompts for common workflows:
 #### Local Agent Dev Workflow
 An interactive prompt that guides you through testing an agent locally:
 ```bash
-npx @modelcontextprotocol/inspector \
+npx --min-release-age=30 @modelcontextprotocol/inspector \
   --config $(git rev-parse --show-toplevel)/.mcp.json \
   --server dispatch-operator-localhost \
   --cli --method prompts/get \
@@ -118,14 +118,14 @@ This MCP server provides tools to interact with a deployed agent. It dynamically
 
 Inspect:
 ```bash
-npx @modelcontextprotocol/inspector \
+npx --min-release-age=30 @modelcontextprotocol/inspector \
   --config $(git rev-parse --show-toplevel)/.mcp.json \
   --server dispatch-agent-examples-hello-world
 ```
 
 List tools:
 ```bash
-npx @modelcontextprotocol/inspector \
+npx --min-release-age=30 @modelcontextprotocol/inspector \
   --config $(git rev-parse --show-toplevel)/.mcp.json \
   --server dispatch-agent-examples-hello-world \
   --cli --method tools/list \

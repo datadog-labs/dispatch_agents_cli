@@ -22,7 +22,6 @@ DISPATCH_DEPLOY_URL = DISPATCH_API_BASE + "/api/unstable"
 
 DISPATCH_DIR = ".dispatch"
 DISPATCH_YAML = "dispatch.yaml"
-DISPATCH_YAML_HIDDEN = ".dispatch.yaml"  # backward compat
 DISPATCH_LISTENER_MODULE = "__dispatch_listener__"
 DISPATCH_LISTENER_FILE = f"{DISPATCH_LISTENER_MODULE}.py"
 
@@ -127,6 +126,7 @@ DEFAULT_CONFIG: dict[str, object | None] = {
     "volumes": None,  # list of volume objects (like [{"name": "data", "mountPath": "/data", "mode": "read_write_many"}])
     "mcp_servers": None,  # list of MCP server configs (e.g., [{"server": "com.datadoghq.mcp"}])
     "resources": None,  # resource limits (like {"cpu": 512, "memory": 1024})
+    "network": None,  # network egress restrictions (like {"egress": {"allow_domains": [{"match_name": "api.openai.com"}]}})
 }
 
 
@@ -188,20 +188,20 @@ def read_project_config(
 
 
 def _find_dispatch_yaml(path: str) -> str | None:
-    """Return the path to the dispatch config file, or None if not found.
-
-    Prefers ``dispatch.yaml``; falls back to ``.dispatch.yaml`` for
-    backward compatibility.
-    """
-    for name in (DISPATCH_YAML, DISPATCH_YAML_HIDDEN):
-        candidate = os.path.join(path, name)
-        if os.path.exists(candidate):
-            return candidate
+    """Return the path to the dispatch config file, or None if not found."""
+    hidden = os.path.join(path, ".dispatch.yaml")
+    if os.path.exists(hidden):
+        raise RuntimeError(
+            ".dispatch.yaml is no longer supported; rename it to dispatch.yaml"
+        )
+    candidate = os.path.join(path, DISPATCH_YAML)
+    if os.path.exists(candidate):
+        return candidate
     return None
 
 
 def read_dispatch_yaml(path: str) -> dict:
-    """Read configuration overrides from dispatch.yaml (or .dispatch.yaml)."""
+    """Read configuration overrides from dispatch.yaml."""
     yaml_path = _find_dispatch_yaml(path)
     if yaml_path is None:
         return {}
@@ -229,7 +229,7 @@ def read_dispatch_yaml(path: str) -> dict:
 
 
 def save_dispatch_yaml(path: str, config: dict) -> None:
-    """Persist configuration values to dispatch.yaml (or .dispatch.yaml if that's what exists)."""
+    """Persist configuration values to dispatch.yaml."""
     # Write to whichever file already exists; default to dispatch.yaml for new projects
     yaml_path = _find_dispatch_yaml(path) or os.path.join(path, DISPATCH_YAML)
     payload = _config_for_yaml(config)
@@ -691,10 +691,9 @@ def validate_dispatch_project(path: str) -> bool:
     has_python_reqs(path, warn=True)
 
     dispatch_dir = os.path.join(path, DISPATCH_DIR)
-    dockerfile_path = os.path.join(dispatch_dir, "Dockerfile")
     listener_path = os.path.join(dispatch_dir, DISPATCH_LISTENER_FILE)
 
-    for check_path in [dispatch_dir, dockerfile_path, listener_path]:
+    for check_path in [dispatch_dir, listener_path]:
         if not os.path.exists(check_path):
             logger.error(
                 f"{check_path} not found. "
@@ -702,24 +701,17 @@ def validate_dispatch_project(path: str) -> bool:
             )
             return False
 
-    # Check for dispatch config file conflicts and deprecation
+    # Check for dispatch config file
     has_visible = os.path.exists(os.path.join(path, DISPATCH_YAML))
-    has_hidden = os.path.exists(os.path.join(path, DISPATCH_YAML_HIDDEN))
+    has_hidden = os.path.exists(os.path.join(path, ".dispatch.yaml"))
 
-    if has_visible and has_hidden:
+    if has_hidden:
         logger.error(
-            f"Found both {DISPATCH_YAML} and {DISPATCH_YAML_HIDDEN}. "
-            f"Please remove {DISPATCH_YAML_HIDDEN} and keep only {DISPATCH_YAML}."
+            ".dispatch.yaml is no longer supported; rename it to dispatch.yaml"
         )
         return False
 
-    if has_hidden and not has_visible:
-        logger.warning(
-            f"{DISPATCH_YAML_HIDDEN} is deprecated and will be removed in a future release. "
-            f"Please rename it to {DISPATCH_YAML}."
-        )
-
-    if not has_visible and not has_hidden:
+    if not has_visible:
         logger.error(
             f"{DISPATCH_YAML} not found. "
             "Run 'dispatch agent init' to regenerate project assets."

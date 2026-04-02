@@ -51,10 +51,6 @@ class TestInitCommand:
             dispatch_dir = os.path.join(tmpdir, DISPATCH_DIR)
             assert os.path.exists(dispatch_dir)
 
-            # Check Dockerfile was created
-            dockerfile_path = os.path.join(dispatch_dir, "Dockerfile")
-            assert os.path.exists(dockerfile_path)
-
             # Check listener was created
             listener_path = os.path.join(dispatch_dir, DISPATCH_LISTENER_FILE)
             assert os.path.exists(listener_path)
@@ -155,7 +151,6 @@ system_packages = []
             assert result.exit_code == 0
 
             # make sure only the files we expect are created
-            assert os.path.exists(os.path.join(tmpdir, ".dispatch", "Dockerfile"))
             assert os.path.exists(
                 os.path.join(tmpdir, ".dispatch", DISPATCH_LISTENER_FILE)
             )
@@ -165,15 +160,3 @@ system_packages = []
             with open(os.path.join(tmpdir, DISPATCH_YAML)) as fh:
                 config = yaml.safe_load(fh)
             assert config["entrypoint"] == "my_agent.py"
-
-
-class TestBuildCommand:
-    def test_build_requires_init(self):
-        """Test that build command fails if project not initialized."""
-        runner = CliRunner()
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            result = runner.invoke(app, ["agent", "build", "--path", tmpdir])
-
-            assert result.exit_code == 1
-            assert "dispatch agent init" in result.output

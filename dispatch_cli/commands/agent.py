@@ -1,8 +1,8 @@
 """Agent management commands."""
 
+import concurrent.futures
 import json
 import os
-import shlex
 import shutil
 import signal
 import socket
@@ -13,14 +13,15 @@ import tempfile
 import threading
 import time
 from datetime import UTC, datetime
+from io import BytesIO
 from pathlib import Path
-from string import Template
 from typing import IO, Annotated, cast
 
 import pathspec
 import requests
 import typer
 from dispatch_agents.models import AgentContainerStatus
+from rich.console import Console
 from rich.progress import (
     BarColumn,
     Progress,
@@ -29,14 +30,13 @@ from rich.progress import (
     TextColumn,
 )
 from rich.status import Status
+from rich.table import Table
 from watchfiles import PythonFilter, watch
 
 from dispatch_cli.auth import get_api_key, handle_auth_error
 from dispatch_cli.commands.router import (
-    DISPATCH_CLI_LABEL,
-    DISPATCH_NETWORK,
-    ROUTER_SERVICE_NAME,
-    start_router,
+    get_active_router,
+    start_router_background,
 )
 from dispatch_cli.logger import get_logger
 from dispatch_cli.registry import (
@@ -61,14 +61,15 @@ from dispatch_cli.utils import (
     check_env_secrets_not_in_config,
     configure_dispatch_project,
     derive_agent_name,
-    detect_dependency_strategy,
     extract_local_deps_from_pyproject,
     get_sdk_dependency,
     has_python_reqs,
     load_dispatch_config,
-    process_local_dependencies,
-    render_dependency_install_step,
     validate_dispatch_project,
+)
+from dispatch_cli.version_check import (
+    check_sdk_version_suggestion,
+    validate_sdk_version,
 )
 
 agent_app = typer.Typer(
@@ -305,7 +306,6 @@ def _check_and_suggest_sdk_update(
     Returns:
         True if execution should continue, False if it should be blocked
     """
-    from dispatch_cli.version_check import check_sdk_version_suggestion
 
     logger = get_logger()
 
@@ -370,12 +370,6 @@ def parallel_multipart_upload(
     file_path: str, part_urls: dict, progress: Progress
 ) -> list[dict]:
     """Upload all parts in parallel using ThreadPoolExecutor for true concurrency."""
-    import concurrent.futures
-    import threading
-    import time
-    from io import BytesIO
-
-    import requests
 
     # Thread-safe progress updates
     progress_lock = threading.Lock()
@@ -606,7 +600,6 @@ def init(
             logger.debug("Creating minimal pyproject.toml using 'uv init --bare'...")
 
             # Get Python version from DEFAULT_BASE_IMAGE for requires-python
-            from dispatch_cli.utils import DEFAULT_BASE_IMAGE
 
             default_python_version = SUPPORTED_BASE_IMAGES.get(
                 DEFAULT_BASE_IMAGE, "3.13"
@@ -724,12 +717,6 @@ async def hello_world(payload: HelloWorldRequest) -> HelloWorldResponse:
 '''
             )
 
-    # Create Dockerfile in .dispatch/
-    dockerfile_path = os.path.join(dispatch_dir, "Dockerfile")
-    logger.debug(f"Creating {dockerfile_path}")
-    template_dir = Path(__file__).parent.parent / "templates"
-    shutil.copy(template_dir / "Dockerfile", dockerfile_path)
-
     # Create listener in .dispatch/
     listener_path = os.path.join(dispatch_dir, DISPATCH_LISTENER_FILE)
     logger.debug(f"Creating {listener_path}")
@@ -746,12 +733,6 @@ async def hello_world(payload: HelloWorldRequest) -> HelloWorldResponse:
     logger.debug(f"Creating {gitignore_path}")
     with open(gitignore_path, "w") as f:
         f.write("*\n")
-
-    # add a .dockerignore file so that .dispatch/ is not committed
-    dockerignore_path = os.path.join(dispatch_dir, "Dockerfile.dockerignore")
-    logger.debug(f"Creating {dockerignore_path}")
-    with open(dockerignore_path, "w") as f:
-        f.write(".dispatch/*.tar\n.venv/\n__pycache__\n.env\n")
 
     logger.success(f"Initialized! Files created in {dispatch_dir}")
 
@@ -947,7 +928,10 @@ def _run_agent_process(
 @agent_app.command("dev")
 def dev(
     path: Annotated[str, typer.Option()] = ".",
-    port: Annotated[int | None, typer.Option()] = None,
+    agent_port: Annotated[
+        int | None,
+        typer.Option("--agent-port", help="Port for the agent gRPC server"),
+    ] = None,
     router_port: Annotated[int | None, typer.Option()] = None,
     reload: Annotated[bool, typer.Option()] = False,
     verbose: Annotated[
@@ -978,7 +962,6 @@ def dev(
     Use --reload to automatically restart the agent when Python files change.
     Use --verbose/-v to show all SDK logs including subscription events.
     """
-    from dispatch_cli.logger import get_logger
 
     logger = get_logger()
     if not validate_dispatch_project(path):
@@ -988,27 +971,44 @@ def dev(
     if not _check_and_suggest_sdk_update(path, force=force):
         raise typer.Exit(1)
 
-    if router_port is None:
-        router_port = LOCAL_ROUTER_PORT
     # Load config and get agent name (same as run command)
     abs_path = os.path.abspath(path)
     config = load_dispatch_config(abs_path)
     agent_name = get_agent_name_from_project(abs_path, config)
 
-    # Use dynamic port allocation if not specified
-    if port is None:
+    # Use dynamic port allocation for agent if not specified
+    if agent_port is None:
         agent_port = find_available_port()
         logger.debug(f"Using port {agent_port} for agent {agent_name}")
     else:
-        agent_port = port
         logger.debug(f"Using specified port {agent_port}")
 
-    # Ensure router is running for local development
-    if not check_router_running(router_port=router_port):
-        logger.error(
-            "Router not started. Please run: `dispatch router start` to start the local router."
-        )
-        raise typer.Exit(1)
+    # Resolve router: use existing running router, or start one
+    if router_port is not None:
+        # Explicit port — check it's running
+        if not check_router_running(router_port=router_port):
+            logger.info("Router not running, starting it in the background...")
+            if not start_router_background(port=router_port):
+                logger.error(
+                    "Failed to start router. Try running `dispatch router start` manually."
+                )
+                raise typer.Exit(1)
+    else:
+        # No port specified — check for an active router first
+        active = get_active_router()
+        if active:
+            router_port = active["port"]
+            logger.success(f"Using running router on port {router_port}")
+        else:
+            # Try to start on the default port
+            router_port = LOCAL_ROUTER_PORT
+            logger.info("No router running, starting one in the background...")
+            if not start_router_background(port=router_port):
+                logger.error(
+                    f"Failed to start router on default port {router_port}.\n"
+                    "  Try: dispatch agent dev --router-port <free-port>"
+                )
+                raise typer.Exit(1)
 
     # Pre-register agent URL with router (so it knows the correct gRPC port)
     agent_url = f"127.0.0.1:{agent_port}"
@@ -1170,11 +1170,6 @@ def dev(
 
 
 def generate_schemas_for_dev(abs_path: str, agent_name: str) -> None:
-    """Generate schemas for local development without building Docker image."""
-    import shutil
-    import subprocess
-    import sys
-    import tempfile
 
     # Create a dispatch directory for schemas
     dispatch_dir = os.path.join(abs_path, DISPATCH_DIR)
@@ -1300,250 +1295,6 @@ def generate_schemas_for_dev(abs_path: str, agent_name: str) -> None:
             logger.warning("Schema extraction timed out")
         except Exception as e:
             logger.warning(f"Schema extraction error: {e}")
-
-
-def validate_dispatch_agents_dependency(abs_path: str) -> bool:
-    """Validate that dispatch_agents is included in user dependencies."""
-    import tomlkit
-
-    logger = get_logger()
-    # Check pyproject.toml first
-    pyproject_path = os.path.join(abs_path, "pyproject.toml")
-    if os.path.exists(pyproject_path):
-        try:
-            with open(pyproject_path, "rb") as f:
-                pyproject = tomlkit.load(f)
-
-            dependencies = pyproject.get("project", {}).get("dependencies", [])
-            for dep in dependencies:
-                if isinstance(dep, str) and (
-                    "dispatch_agents" in dep.lower() or "dispatch-agents" in dep.lower()
-                ):
-                    return True
-
-            logger.error("dispatch_agents not found in pyproject.toml dependencies.")
-            logger.info("Please add dispatch_agents to your pyproject.toml:")
-            logger.code(
-                "uv add git+ssh://git@github.com/datadog-labs/dispatch_agents_sdk.git",
-                "bash",
-            )
-            logger.info("(fastapi, uvicorn, etc. will be installed automatically)")
-            return False
-
-        except Exception as e:
-            logger.warning(f"Could not parse pyproject.toml: {e}")
-
-    # Check requirements files
-    for req_file in [
-        "requirements.txt",
-        "requirements-prod.txt",
-        "requirements-dev.txt",
-    ]:
-        req_path = os.path.join(abs_path, req_file)
-        if os.path.exists(req_path):
-            try:
-                with open(req_path) as f:
-                    content = f.read()
-                if "dispatch_agents" in content.lower():
-                    return True
-            except Exception as e:
-                logger.warning(f"Could not read {req_file}: {e}")
-
-    logger.error("dispatch_agents not found in dependency files.")
-    logger.info(
-        "Please add git+ssh://git@github.com/datadog-labs/dispatch_agents_sdk.git to your requirements.txt"
-    )
-    return False
-
-
-@agent_app.command("build")
-def build(path: Annotated[str, typer.Option()] = "."):
-    """Build Docker container for agent."""
-    logger = get_logger()
-    abs_path = os.path.abspath(path)
-    if not validate_dispatch_project(abs_path):
-        raise typer.Exit(1)
-
-    if not validate_dispatch_agents_dependency(abs_path):
-        raise typer.Exit(1)
-    dispatch_dir = os.path.join(abs_path, DISPATCH_DIR)
-
-    logger.info(f"Building in {abs_path}")
-
-    # Always refresh listener from template to pick up latest changes
-    try:
-        template_dir = Path(__file__).parent.parent / "templates"
-        listener_template = template_dir / "grpc_listener.py"
-        listener_path = os.path.join(dispatch_dir, DISPATCH_LISTENER_FILE)
-        shutil.copy(listener_template, listener_path)
-        logger.debug(f"Refreshed listener from template → {listener_path}")
-    except Exception as e:
-        logger.warning(f"Failed to refresh listener template: {e}")
-
-    # Copy schema extraction script for Docker build
-    try:
-        schema_template = template_dir / "extract_schemas.py"
-        schema_path = os.path.join(dispatch_dir, "extract_schemas.py")
-        shutil.copy(schema_template, schema_path)
-        logger.debug(f"Added schema extraction script → {schema_path}")
-    except Exception as e:
-        logger.warning(f"Failed to copy schema extraction script: {e}")
-
-    # Read config to get build variables (with defaults merged)
-    config = load_dispatch_config(abs_path)
-    dependency_install_step = "# NO PYTHON DEPENDENCIES SPECIFIED [no pyproject.toml or requirements.txt found]"
-    strategy = None
-
-    if has_python_reqs(
-        abs_path, warn=False
-    ):  # true when requirements or pyproject.toml file detected
-        strategy, strategy_details = detect_dependency_strategy(abs_path, config)
-        logger.debug(f"Dependency install strategy: {strategy}")
-        dependency_install_step = render_dependency_install_step(
-            strategy, strategy_details
-        )
-
-    # Prepare build args and local dependencies
-    if strategy == "bundled":
-        local_deps_copy = ""
-        local_deps_path_fix = ""
-        local_deps_install = ""
-    else:
-        local_deps_copy, local_deps_path_fix, local_deps_install = (
-            process_local_dependencies(config, abs_path)
-        )
-    # Get merged local deps (from both config and pyproject.toml)
-
-    config_deps = config.get("local_dependencies") or {}
-    pyproject_deps = extract_local_deps_from_pyproject(abs_path)
-    local_deps = {**pyproject_deps, **config_deps}
-
-    # Dispatch requirements (fastapi, uvicorn, etc.) are now in pyproject.toml
-    # and handled by uv sync, so no separate step needed
-
-    # Use same name derivation logic as register command
-    agent_name = get_agent_name_from_project(abs_path, config)
-
-    # Generate service name and image tag using same logic as register
-    image_tag = f"dispatchagents-{agent_name}"
-    logger.info(f"Using name '{agent_name}' → image tag: {image_tag}")
-
-    dockerfile_path = os.path.join(dispatch_dir, "Dockerfile")
-
-    # Build docker command with named build contexts for local path dependencies
-    # Note: Git dependencies cannot be used in local builds - use 'deploy' for remote builds
-    build_contexts: list[dict[str, str]] = []
-    for dep_name, dep_config in local_deps.items():
-        # Only handle path dependencies (strings) for local builds
-        if not isinstance(dep_config, str):
-            logger.warning(
-                f"Skipping {dep_name} (git dependency). "
-                "Use 'dispatch agent deploy' for remote builds."
-            )
-            continue
-
-        # Resolve relative paths
-        if not os.path.isabs(dep_config):
-            dep_path = os.path.join(abs_path, dep_config)
-        else:
-            dep_path = dep_config
-
-        if os.path.exists(dep_path):
-            build_contexts.append({"name": dep_name, "path": dep_path})
-
-    # All local dependencies (including dispatch-agents if configured locally)
-    # are now handled by the existing local_deps logic above via pyproject.toml scanning
-
-    # Generate Dockerfile with template substitution for local dependencies
-
-    template_dir = Path(__file__).parent.parent / "templates"
-    dockerfile_template = Template((template_dir / "Dockerfile").read_text())
-
-    system_packages = config.get("system_packages") or []
-    if system_packages:
-        packages_str = " ".join(system_packages)
-        system_packages_step = (
-            "RUN apt-get update && \\\n"
-            "    apt-get install -y --no-install-recommends "
-            f"{packages_str} && \\\n"
-            "    rm -rf /var/lib/apt/lists/*"
-        )
-    else:
-        system_packages_step = ""
-
-    # Generate actual Dockerfile with templated substitutions
-    dockerfile_content = dockerfile_template.substitute(
-        SYSTEM_PACKAGES_STEP=system_packages_step,
-        DEPENDENCY_INSTALL_STEP=dependency_install_step,
-        LOCAL_DEPS_COPY=local_deps_copy,
-        LOCAL_DEPS_PATH_FIX=local_deps_path_fix,
-        LOCAL_DEPS_INSTALL=local_deps_install,
-        DISPATCH_AGENT_NAME=agent_name,
-        BASE_IMAGE=config.get("base_image", "python:3.11-slim"),
-    )
-
-    # Write the generated Dockerfile
-    with open(dockerfile_path, "w") as f:
-        f.write(dockerfile_content)
-
-    # Build args for the Dockerfile template
-
-    # Only add SSH if SSH_AUTH_SOCK is set (needed for git dependencies)
-    ssh_arg = ""
-    if os.getenv("SSH_AUTH_SOCK"):
-        ssh_arg = "--ssh default"
-
-    # Pass .env file as secret if it exists
-    secret_arg = ""
-    if os.path.exists(os.path.join(abs_path, ".env")):
-        secret_arg = "--secret id=dotenv,src=.env"
-
-    build_cmd: list[str] = [
-        "docker",
-        "buildx",
-        "build",
-        "--platform",
-        "linux/amd64",
-        "--load",
-    ]
-    if ssh_arg:
-        build_cmd.extend(["--ssh", "default"])
-    if secret_arg:
-        build_cmd.extend(["--secret", "id=dotenv,src=.env"])
-    for ctx in build_contexts:
-        build_cmd.extend(["--build-context", f"{ctx['name']}={ctx['path']}"])
-    build_cmd.extend(["-t", image_tag, "-f", dockerfile_path, abs_path])
-    logger.debug(f"Running build: {build_cmd}")
-    build_result = subprocess.run(build_cmd)
-    if build_result.returncode != 0:
-        raise typer.Exit(build_result.returncode)
-    logger.success(f"Built image: {image_tag}")
-
-    # Extract schemas from the built image
-    schemas_path = os.path.join(dispatch_dir, "schemas.json")
-    logger.debug("Extracting schemas from built image...")
-
-    # Check for .env file and include it if present
-    has_env_file = os.path.exists(os.path.join(abs_path, ".env"))
-    logger.debug(f"Has .env file: {has_env_file}")
-
-    extract_cmd: list[str] = ["docker", "run", "--rm"]
-    if has_env_file:
-        extract_cmd.extend(["--env-file", ".env"])
-    extract_cmd.extend([image_tag, "cat", "/app/.dispatch/schemas.json"])
-    with open(schemas_path, "w") as schemas_file:
-        extract_result = subprocess.run(extract_cmd, stdout=schemas_file)
-    if extract_result.returncode == 0 and os.path.exists(schemas_path):
-        logger.success(f"Extracted schemas to: {schemas_path}")
-    else:
-        logger.warning("Schema extraction failed - no schemas.json found")
-
-    amd_tar_path = os.path.join(dispatch_dir, f"{image_tag}.tar")
-    logger.debug(f"Exporting image tarball → {amd_tar_path}")
-    save_result = subprocess.run(["docker", "save", image_tag, "-o", amd_tar_path])
-    if save_result.returncode != 0:
-        raise typer.Exit(save_result.returncode)
-    logger.success(f"Saved tarball at {amd_tar_path}")
 
 
 def validate_namespace(
@@ -1881,79 +1632,14 @@ def check_required_mcp_servers(
     return False, auth_headers
 
 
-def check_router_running(
-    containerized: bool = False,
-    force_rebuild: bool = False,
-    router_port: int | None = None,
-):
-    """Ensure router service is running"""
-    logger = get_logger()
+def check_router_running(router_port: int) -> bool:
+    """Check if the router service is running on the given port."""
     try:
-        # Check if router container is running
-        if containerized:
-            inspect_result = subprocess.run(
-                [
-                    "docker",
-                    "inspect",
-                    ROUTER_SERVICE_NAME,
-                    "--format",
-                    "{{.State.Status}}",
-                ],
-                capture_output=True,
-                text=True,
-            )
-            if inspect_result.returncode == 0:
-                status = inspect_result.stdout.strip()
-                if status == "running":
-                    if force_rebuild:
-                        logger.info(
-                            "Router running; rebuilding to pick up latest dependencies..."
-                        )
-                        return False
-                    else:
-                        logger.success("Router service already running")
-                        return True
-                else:
-                    logger.warning(f"Router service exists but not running ({status})")
-                    return False
-
-            else:
-                logger.warning("Router service not found")
-                return False
-        else:
-            try:
-                resp = requests.get(
-                    f"{LOCAL_ROUTER_URL}:{router_port}/health", timeout=2.0
-                )
-                resp.raise_for_status()
-                if resp.json()["service"] == "dispatch-local-router":
-                    logger.success("Router service already running")
-                    return True
-            except Exception:
-                return False
+        resp = requests.get(f"{LOCAL_ROUTER_URL}:{router_port}/health", timeout=2.0)
+        resp.raise_for_status()
+        return resp.json().get("service") == "dispatch-local-router"
     except Exception:
         return False
-
-
-def check_and_start_router(
-    containerized=False, force_rebuild=False, router_port: int | None = None
-):
-    logger = get_logger()
-    if router_port is None:
-        router_port = LOCAL_ROUTER_PORT
-    running = check_router_running(containerized, force_rebuild, router_port)
-    if running and not force_rebuild:
-        return True
-
-    # Call router start command with requested rebuild behavior
-    start_router(
-        containerized=containerized, force_rebuild=force_rebuild, port=router_port
-    )
-
-    logger.success("Router service starting")
-    logger.info(f"  Access router at: {LOCAL_ROUTER_URL}:{router_port}")
-    logger.info(f"  View docs at: {LOCAL_ROUTER_URL}:{router_port}/docs")
-    return True
 
 
 def create_source_package(abs_path: str, config: dict) -> str:
@@ -2318,8 +2004,6 @@ def deploy(
     agent_name = get_agent_name_from_project(abs_path, config)
 
     # Check SDK version (every deploy)
-    from dispatch_cli.version_check import validate_sdk_version
-
     detected_sdk_version = get_sdk_version_from_agent(abs_path)
     if detected_sdk_version:
         logger.info(f"Detected SDK version: {detected_sdk_version}")
@@ -2388,9 +2072,7 @@ def deploy(
     logger.info("Running pre-deployment validation...")
     if not force:
         try:
-            validate(
-                namespace=namespace, path=path, force=force, skip_docker_build=True
-            )
+            validate(namespace=namespace, path=path, force=force)
         except typer.Exit as e:
             logger.warning("Deployment cancelled due to validation failures.")
             logger.info("Use --force flag to skip validation checks.")
@@ -2612,184 +2294,6 @@ def deploy(
         raise typer.Exit(1)
 
 
-@agent_app.command("run")
-def run(
-    path: Annotated[str, typer.Option()] = ".",
-    args: Annotated[str, typer.Option()] = "",
-    force_rebuild: Annotated[bool, typer.Option()] = False,
-):
-    """Run the agent container."""
-    logger = get_logger()
-    abs_path = os.path.abspath(path)
-
-    if not validate_dispatch_project(abs_path):
-        raise typer.Exit(1)
-
-    config = load_dispatch_config(abs_path)
-
-    check_dotenv_has_all_secrets(
-        path, config
-    )  # Warn if .env is missing secrets from config
-
-    agent_name = get_agent_name_from_project(abs_path, config)
-    image_tag = f"dispatchagents-{agent_name}"
-    container_name = f"dispatchagents-{agent_name}"
-    trigger_alias = f"{agent_name}.trigger"
-    agent_url = f"{agent_name}.trigger:50051"
-
-    # Check if image exists, if not, build it automatically
-    logger.info("[cyan]→[/cyan] Checking for Docker image...")
-    check_image_result = subprocess.run(
-        ["docker", "image", "inspect", image_tag],
-        capture_output=True,
-        text=True,
-    )
-    if check_image_result.returncode != 0:
-        logger.info(f"Image {image_tag} not found, building from source...")
-        try:
-            build(path=abs_path)
-        except typer.Exit as e:
-            if e.exit_code != 0:
-                logger.error("[red]✗[/red] Failed to build image")
-                raise
-        logger.success(f"[green]✓[/green] Built image: {image_tag}")
-    else:
-        logger.success(f"[green]✓[/green] Using existing image: {image_tag}")
-
-    # Ensure router is running for local multi-agent communication
-    logger.info("Checking router service...")
-    check_and_start_router(containerized=True, force_rebuild=force_rebuild)
-
-    # Stop and remove existing container if it exists
-    logger.debug("Stopping existing container if running...")
-    subprocess.run(["docker", "stop", container_name], capture_output=True, text=True)
-    subprocess.run(["docker", "rm", container_name], capture_output=True, text=True)
-
-    # Register agent in local SQLite database (like backend does with DynamoDB)
-    try:
-        existing_agent = get_agent_from_registry(agent_name)
-        if existing_agent:
-            logger.debug(f"Updating existing agent: {agent_name}")
-            update_agent_status(
-                agent_name, AgentContainerStatus.DEPLOYED, {"url": agent_url}
-            )
-        else:
-            logger.debug(f"Registering new agent: {agent_name}")
-            add_agent_to_registry(
-                agent_name, [], AgentContainerStatus.DEPLOYED, {"url": agent_url}
-            )
-    except Exception as e:
-        logger.warning(f"Warning: Failed to register agent in database: {e}")
-    agent_port = find_available_port()
-    logger.debug(f"Using port {agent_port} for agent {agent_name}")
-
-    has_env_file = os.path.exists(os.path.join(abs_path, ".env"))
-
-    run_cmd: list[str] = [
-        "docker",
-        "run",
-        "-d",
-        "--platform",
-        "linux/amd64",
-    ]
-    if has_env_file:
-        run_cmd.extend(["--env-file", ".env"])
-    run_cmd.extend(
-        [
-            "--name",
-            container_name,
-            "--label",
-            DISPATCH_CLI_LABEL,
-            "-p",
-            f"{agent_port}:50051",
-            "--network",
-            DISPATCH_NETWORK,
-            "--network-alias",
-            trigger_alias,
-            "-e",
-            f"BACKEND_URL=http://dispatch.api:{LOCAL_ROUTER_PORT}",
-            "-e",
-            "DISPATCH_NAMESPACE=dev",
-            "-e",
-            "DISPATCH_API_KEY=local-dev-key",
-        ]
-    )
-    if args:
-        run_cmd.extend(shlex.split(args))
-    run_cmd.append(image_tag)
-    logger.debug(f"Running image {image_tag} (built from {abs_path})")
-    logger.debug(f"Container: {container_name} with network alias: {trigger_alias}")
-    logger.debug(f"Command: {run_cmd}")
-    subprocess.run(run_cmd)
-    logger.info(f"Container started from {image_tag} on network {DISPATCH_NETWORK}")
-    logger.info("")
-    logger.success(f"Agent '{agent_name}' is now running!")
-    logger.info(f"  Router: {LOCAL_ROUTER_URL}:{LOCAL_ROUTER_PORT}")
-    logger.info("  Test routing: dispatch router test <topic> --payload '{}'")
-    logger.info("  View status: dispatch router status")
-
-
-@agent_app.command("stop")
-def stop():
-    """Stop all running agent containers."""
-    logger = get_logger()
-    logger.info("Stopping...")
-
-    # Mark all agents as stopped in database
-    try:
-        agents = list_agents_from_registry()
-        for agent in agents:
-            if agent.status == "running":
-                update_agent_status(agent.name, AgentContainerStatus.DEPLOYED.value)
-                logger.debug(f"Marked agent {agent.name} as no longger running")
-    except Exception as e:
-        logger.warning(f"Warning: Failed to update agent status in database: {e}")
-
-    try:
-        agents = list_agents_from_registry()
-    except Exception as exc:
-        logger.error(f"Failed to read registry: {exc}")
-        raise typer.Exit(1)
-
-    if not agents:
-        logger.info("No agents registered. Nothing to stop.")
-        return
-
-    stopped_any = False
-    for agent in agents:
-        container_name = f"dispatchagents-{agent.name}"
-        result = subprocess.run(
-            ["docker", "stop", container_name],
-            capture_output=True,
-            text=True,
-        )
-        if result.returncode == 0:
-            logger.success(f"Stopped container {container_name}")
-            stopped_any = True
-        else:
-            if "No such container" in (result.stderr or ""):
-                logger.warning(f"Container {container_name} not running; skipping stop")
-            else:
-                logger.warning(
-                    f"Failed to stop {container_name}: {result.stderr.strip()}"
-                )
-
-        metadata_payload = {}
-        url_value = agent.url or (agent.metadata or {}).get("url")
-        if url_value:
-            metadata_payload["url"] = url_value
-        update_agent_status(
-            agent.name,
-            AgentContainerStatus.DEPLOYED.value,
-            metadata_payload if metadata_payload else None,
-        )
-
-    if stopped_any:
-        logger.info("All registered agent containers have been stopped.")
-    else:
-        logger.info("No running agent containers were found for registered agents.")
-
-
 @agent_app.command("unregister")
 def unregister_agent():
     """Unregister current agent project from the local registry."""
@@ -2869,6 +2373,8 @@ def extract_handler_schemas_from_agent(agent_path: str) -> dict:
         schemas_path = os.path.join(agent_path, ".dispatch", "schemas.json")
 
         if not os.path.exists(schemas_path):
+            # TODO(matt): Update CLI/web docs and remaining user-facing messages to
+            # remove build-mode references now that `dispatch agent build` is gone.
             logger.warning("No schemas.json found. Run 'dispatch agent build' first.")
             return {}
 
@@ -2996,13 +2502,6 @@ def validate(
             help="Skip interactive prompts and auto-confirm actions",
         ),
     ] = False,
-    skip_docker_build: Annotated[
-        bool,
-        typer.Option(
-            "--skip-docker-build",
-            help="Skip Docker image build (schemas already extracted)",
-        ),
-    ] = True,
 ):
     """Validate agent configuration, namespace, and schema compatibility."""
     logger = get_logger()
@@ -3064,42 +2563,13 @@ def validate(
 
     # Check if schemas already exist (from source package creation)
     schemas_path = os.path.join(abs_path, ".dispatch", "schemas.json")
-    schemas_exist = os.path.exists(schemas_path)
 
-    if skip_docker_build:
-        # Source build path: schemas should already exist
-        if schemas_exist:
-            logger.debug(f"Using existing schemas from: {schemas_path}")
-            logger.success("Schemas available.")
-        else:
-            logger.error(f"schemas.json not found at {schemas_path}")
-            logger.debug(
-                "Expected schemas to exist. Did you run 'dispatch agent build' yet?"
-            )
-            validation_passed = False
+    if os.path.exists(schemas_path):
+        logger.debug(f"Using existing schemas from: {schemas_path}")
+        logger.success("Schemas available.")
     else:
-        # Regular build path: ensure Docker image exists
-        image_tag = f"dispatchagents-{agent_name}"
-
-        # Check if image exists, if not, build it
-        check_image_result = subprocess.run(
-            ["docker", "image", "inspect", image_tag], capture_output=True, text=True
-        )
-
-        if check_image_result.returncode != 0:
-            logger.info(f"Image {image_tag} not found, building...")
-            try:
-                # Call the build function to create the image
-                build(path=abs_path)
-            except Exception as e:
-                logger.error(f"Failed to build Docker image: {e}")
-                validation_passed = False
-                # Skip schema validation if build failed
-                logger.debug("Skipping schema validation due to build failure.")
-            else:
-                logger.success(f"Built Docker image: {image_tag}")
-        else:
-            logger.debug(f"Using existing image: {image_tag}")
+        logger.error(f"schemas.json not found at {schemas_path}")
+        validation_passed = False
 
     # 5. Check dependencies resolve for linux (deployment target)
     logger.info("")
@@ -3375,8 +2845,6 @@ def list_local():
     Shows agents tracked by the CLI, including their PID, port, and running status.
     Stale tracking entries (for processes that have exited) are marked as not running.
     """
-    from rich.console import Console
-    from rich.table import Table
 
     logger = get_logger()
     agents = get_tracked_agents()

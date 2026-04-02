@@ -11,7 +11,7 @@ Test the complete operator MCP workflow by manually executing each tool in seque
 
 ### 1. Create Agent
 ```bash
-npx @modelcontextprotocol/inspector \
+npx --min-release-age=30 @modelcontextprotocol/inspector \
   --config $(git rev-parse --show-toplevel)/.mcp.json \
   --server dispatch-operator-localhost \
   --cli \
@@ -39,7 +39,7 @@ cat examples/test-workflow-agent/.dispatch.yaml
 
 ### 2. Deploy Agent
 ```bash
-npx @modelcontextprotocol/inspector \
+npx --min-release-age=30 @modelcontextprotocol/inspector \
   --config $(git rev-parse --show-toplevel)/.mcp.json \
   --server dispatch-operator-localhost \
   --cli \
@@ -61,7 +61,7 @@ npx @modelcontextprotocol/inspector \
 
 ### 3. Get Topic Schema
 ```bash
-npx @modelcontextprotocol/inspector \
+npx --min-release-age=30 @modelcontextprotocol/inspector \
   --config $(git rev-parse --show-toplevel)/.mcp.json \
   --server dispatch-operator-localhost \
   --cli \
@@ -83,7 +83,7 @@ npx @modelcontextprotocol/inspector \
 
 ### 4. Publish Event
 ```bash
-npx @modelcontextprotocol/inspector \
+npx --min-release-age=30 @modelcontextprotocol/inspector \
   --config $(git rev-parse --show-toplevel)/.mcp.json \
   --server dispatch-operator-localhost \
   --cli \
@@ -104,7 +104,7 @@ npx @modelcontextprotocol/inspector \
 
 ### 5. Get Agent Logs
 ```bash
-npx @modelcontextprotocol/inspector \
+npx --min-release-age=30 @modelcontextprotocol/inspector \
   --config $(git rev-parse --show-toplevel)/.mcp.json \
   --server dispatch-operator-localhost \
   --cli \
@@ -132,7 +132,7 @@ npx @modelcontextprotocol/inspector \
 
 ### 6. Uninstall Agent
 ```bash
-npx @modelcontextprotocol/inspector \
+npx --min-release-age=30 @modelcontextprotocol/inspector \
   --config $(git rev-parse --show-toplevel)/.mcp.json \
   --server dispatch-operator-localhost \
   --cli \
