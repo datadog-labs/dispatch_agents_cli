@@ -124,6 +124,10 @@ class TestInitCommand:
             with open(pyproject_path, "w") as f:
                 f.write(
                     """
+[project]
+name = "test"
+requires-python = ">=3.13"
+
 [tool.dispatch]
 base_image = "python:3.11-slim"
 port = 3000
@@ -139,10 +143,18 @@ system_packages = []
                     "from dispatch_agents import on\n\n@on(topic='test')\nasync def handler(message: dispatch_agents.Message):\n    return 'Hello from my_agent'"
                 )
 
+            def mock_subprocess_run(args, **kwargs):
+                mock_result = MagicMock()
+                mock_result.returncode = 0
+                mock_result.stdout = ""
+                mock_result.stderr = ""
+                return mock_result
+
             # Mock the prompts: confirm creation and provide namespace
             with patch("typer.confirm", return_value=True):
                 with patch("typer.prompt", return_value="test-namespace"):
-                    result = runner.invoke(app, ["agent", "init", "--path", tmpdir])
+                    with patch("subprocess.run", side_effect=mock_subprocess_run):
+                        result = runner.invoke(app, ["agent", "init", "--path", tmpdir])
 
             if result.exit_code != 0:
                 print(f"Exit code: {result.exit_code}")

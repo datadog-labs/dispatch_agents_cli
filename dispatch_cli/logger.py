@@ -222,16 +222,14 @@ _logger: DispatchLogger | None = None
 def get_logger() -> DispatchLogger:
     """Get the global logger instance.
 
+    Returns the configured global logger, or a default instance if set_logger()
+    has not been called yet (e.g. when auth modules are used before CLI startup).
+
     Returns:
         Global DispatchLogger instance
-
-    Raises:
-        RuntimeError: If logger hasn't been initialized
     """
     if _logger is None:
-        raise RuntimeError(
-            "Logger not initialized. Call set_logger() in main CLI before using."
-        )
+        return DispatchLogger()
     return _logger
 
 

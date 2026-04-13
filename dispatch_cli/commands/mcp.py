@@ -6,15 +6,27 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Annotated
 
+import httpx
 import tomlkit
 import typer
 
-from dispatch_cli.auth import get_api_key, get_api_key_from_keychain
+from dispatch_cli.auth import handle_auth_error
+from dispatch_cli.auth_provider import (
+    CredentialResolver,
+    MissingAuthenticationError,
+    ResolvedCredential,
+    StaticCredentialProvider,
+    default_credential_provider,
+)
 from dispatch_cli.logger import get_logger
 from dispatch_cli.mcp.agent.server import run_agent_server
+from dispatch_cli.mcp.client import (
+    OperatorBackendClient,
+    default_operator_backend_client,
+)
 from dispatch_cli.mcp.config import MCPConfig
 from dispatch_cli.mcp.operator.server import run_operator_server
-from dispatch_cli.utils import DISPATCH_API_BASE, load_dispatch_config
+from dispatch_cli.utils import load_dispatch_config
 
 mcp_app = typer.Typer(name="mcp", help="MCP server management")
 serve_app = typer.Typer(name="serve", help="Start MCP servers")
@@ -48,7 +60,6 @@ def find_git_root() -> Path | None:
 
 def get_claude_code_config_paths() -> list[Path]:
     """Get Claude Code MCP config file paths (project-level only)."""
-    # Try to find git root, otherwise use current directory
     git_root = find_git_root()
     if git_root:
         project_config = git_root / ".mcp.json"
@@ -59,7 +70,6 @@ def get_claude_code_config_paths() -> list[Path]:
 
 def get_cursor_config_paths() -> list[Path]:
     """Get Cursor MCP config file paths (project-level only)."""
-    # Try to find git root, otherwise use current directory
     git_root = find_git_root()
     if git_root:
         cursor_dir = git_root / ".cursor"
@@ -142,7 +152,8 @@ def write_toml_mcp_config(
         config_data["mcp_servers"] = tomlkit.table(is_super_table=True)
 
     mcp_servers = config_data["mcp_servers"]
-    assert isinstance(mcp_servers, dict)
+    if not isinstance(mcp_servers, dict):
+        raise RuntimeError(f"Expected mcp_servers to be a table in {config_path}")
     mcp_servers[server_name] = server_config
 
     config_path.parent.mkdir(parents=True, exist_ok=True)
@@ -158,6 +169,57 @@ def update_mcp_config(
         write_toml_mcp_config(config_path, server_name, server_config)
     else:
         write_json_mcp_config(config_path, server_name, server_config)
+
+
+def build_registered_server_config(args: list[str]) -> dict[str, object]:
+    """Build an MCP client config entry for launching the Dispatch CLI."""
+    server_config: dict[str, object] = {
+        "command": "dispatch",
+        "args": args,
+    }
+
+    deploy_url = os.getenv("DISPATCH_DEPLOY_URL")
+    if deploy_url:
+        server_config["env"] = {"DISPATCH_DEPLOY_URL": deploy_url}
+
+    return server_config
+
+
+def require_mcp_credential_provider() -> CredentialResolver:
+    """Resolve and validate auth up front for local MCP flows."""
+    provider = default_credential_provider()
+    credential = provider.resolve()
+    verify_mcp_backend_auth(credential)
+    return provider
+
+
+def verify_mcp_backend_auth(credential: ResolvedCredential) -> None:
+    """Verify that the resolved credential is accepted by the backend."""
+    client: OperatorBackendClient = default_operator_backend_client(
+        MCPConfig(credential_provider=StaticCredentialProvider(credential))
+    )
+
+    try:
+        client.list_namespaces()
+    except httpx.HTTPStatusError as exc:
+        if exc.response.status_code == 401:
+            handle_auth_error("Authentication could not be verified with the backend")
+
+        detail = exc.response.text.strip()
+        if detail:
+            raise RuntimeError(
+                f"Could not verify authentication with the Dispatch backend: {detail}"
+            ) from exc
+
+        raise RuntimeError(
+            "Could not verify authentication with the Dispatch backend."
+        ) from exc
+    except httpx.HTTPError as exc:
+        raise RuntimeError(
+            "Could not verify authentication with the Dispatch backend."
+        ) from exc
+    finally:
+        client.close()
 
 
 @serve_app.command("agent")
@@ -224,10 +286,10 @@ def serve_agent(
 
         # Handle registration mode
         if register is not None:
-            # Get API key for authentication
+            # Verify the user is authenticated before writing config
             get_logger().info("Authenticating...")
-            get_api_key()
-            get_logger().success("API key stored in keychain")
+            require_mcp_credential_provider()
+            get_logger().success("Authentication verified")
 
             # Determine which configs to update
             match register:
@@ -255,9 +317,8 @@ def serve_agent(
                         raise typer.Exit(1)
 
             # Build server config
-            server_config = {
-                "command": "dispatch",
-                "args": [
+            server_config = build_registered_server_config(
+                [
                     "mcp",
                     "serve",
                     "agent",
@@ -266,8 +327,8 @@ def serve_agent(
                     "--agent",
                     agent,
                 ]
-                + (["--experimental-tasks"] if experimental_tasks else []),
-            }
+                + (["--experimental-tasks"] if experimental_tasks else [])
+            )
 
             # Update configs
             for client_name, config_path in configs_to_update:
@@ -283,28 +344,11 @@ def serve_agent(
             get_logger().success("Agent MCP server registered")
             return
 
-        # Get API key (from env var or keychain only - no interactive prompt for MCP)
-        # When running as MCP server, DISPATCH_API_KEY should be in env (set by MCP config)
-        api_key = os.getenv("DISPATCH_API_KEY")
-        if not api_key:
-            api_key = get_api_key_from_keychain(DISPATCH_API_BASE)
-
-        if not api_key:
-            get_logger().error("No API key found")
-            get_logger().info("")
-            get_logger().info("MCP servers cannot prompt for interactive input.")
-            get_logger().info("Please authenticate first by running:")
-            get_logger().info("")
-            get_logger().info("  dispatch login")
-            get_logger().info("")
-            get_logger().info(
-                "This will store your API key and configure the MCP server."
-            )
-            raise typer.Exit(1)
+        credential_provider = require_mcp_credential_provider()
 
         # Create config for agent server
         config = MCPConfig(
-            api_key=api_key,
+            credential_provider=credential_provider,
             namespace=namespace,
             agent_name=agent,
             use_tasks=experimental_tasks,
@@ -324,6 +368,11 @@ def serve_agent(
 
     except KeyboardInterrupt:
         get_logger().warning("\nShutting down MCP server...")
+    except typer.Exit:
+        raise
+    except MissingAuthenticationError as e:
+        get_logger().error(str(e))
+        raise typer.Exit(1)
     except Exception as e:
         get_logger().error(f"Error: {e}")
         raise typer.Exit(1)
@@ -350,10 +399,10 @@ def serve_operator(
     try:
         # Handle registration mode
         if register is not None:
-            # Get API key for authentication
+            # Verify the user is authenticated before writing config
             get_logger().info("Authenticating...")
-            get_api_key()
-            get_logger().success("API key stored in keychain")
+            require_mcp_credential_provider()
+            get_logger().success("Authentication verified")
 
             # Determine which configs to update
             match register:
@@ -385,10 +434,7 @@ def serve_operator(
             if namespace:
                 args.extend(["--namespace", namespace])
 
-            server_config = {
-                "command": "dispatch",
-                "args": args,
-            }
+            server_config = build_registered_server_config(args)
 
             # Update configs
             for client_name, config_path in configs_to_update:
@@ -412,27 +458,15 @@ def serve_operator(
             get_logger().success("Operator MCP server registered")
             return
 
-        # Get API key (from env var or keychain only - no interactive prompt for MCP)
-        api_key = os.getenv("DISPATCH_API_KEY")
-        if not api_key:
-            api_key = get_api_key_from_keychain(DISPATCH_API_BASE)
-
-        if not api_key:
-            get_logger().error("No API key found")
-            get_logger().info("")
-            get_logger().info("MCP servers cannot prompt for interactive input.")
-            get_logger().info("Please authenticate first by running:")
-            get_logger().info("")
-            get_logger().info("  dispatch login")
-            get_logger().info("")
-            get_logger().info(
-                "This will store your API key and configure the MCP server."
-            )
-            raise typer.Exit(1)
+        # Defer auth resolution for the operator server until a tool is invoked.
+        # Static tool registration can complete without backend access, which lets
+        # MCP clients finish startup and surface actionable auth errors on use
+        # instead of reporting a generic handshake failure.
+        credential_provider = default_credential_provider()
 
         # Create config for operator server
         config = MCPConfig(
-            api_key=api_key,
+            credential_provider=credential_provider,
             namespace=namespace,
             agent_name=None,
             use_tasks=False,  # Operator tools don't need tasks
@@ -450,6 +484,11 @@ def serve_operator(
 
     except KeyboardInterrupt:
         get_logger().warning("\nShutting down MCP server...")
+    except typer.Exit:
+        raise
+    except MissingAuthenticationError as e:
+        get_logger().error(str(e))
+        raise typer.Exit(1)
     except Exception as e:
         get_logger().error(f"Error: {e}")
         raise typer.Exit(1)

@@ -13,7 +13,13 @@ To manually validate performance improvements:
    from dispatch_cli.mcp.config import MCPConfig
    from dispatch_cli.mcp.client import DispatchAPIClient
 
-   config = MCPConfig(api_key="test", deploy_url="http://localhost:8000", namespace="examples")
+   config = MCPConfig(
+       credential_provider=StaticCredentialProvider(
+           ResolvedCredential(auth_mode="api_key", access_token="test")
+       ),
+       deploy_url="http://localhost:8000",
+       namespace="examples",
+   )
    client = DispatchAPIClient(config)
    mcp = create_operator_mcp(client, config)
    fn = mcp._tool_manager._tools["start_local_agent_dev"].fn
@@ -43,6 +49,7 @@ from pathlib import Path
 
 import pytest
 
+from dispatch_cli.auth_provider import ResolvedCredential, StaticCredentialProvider
 from dispatch_cli.mcp.client import DispatchAPIClient
 from dispatch_cli.mcp.config import MCPConfig
 from dispatch_cli.mcp.operator.tools import (
@@ -93,7 +100,9 @@ class TestStartLocalAgentDevIntegration:
 
         # Create real MCP client (not mocked)
         config = MCPConfig(
-            api_key="test",
+            credential_provider=StaticCredentialProvider(
+                ResolvedCredential(auth_mode="api_key", access_token="test")
+            ),
             deploy_url="http://localhost:8000",
             namespace="examples",
         )

@@ -8,12 +8,11 @@ import requests
 import typer
 from rich.table import Table
 
-from dispatch_cli.auth import get_api_key, handle_auth_error
-from dispatch_cli.http_client import get_api_headers
+from dispatch_cli.auth import get_auth_headers, handle_auth_error
 from dispatch_cli.logger import get_logger
 from dispatch_cli.utils import DISPATCH_API_BASE
 
-from .secrets import get_namespace_from_config
+from .secrets import _NAMESPACE_SOURCE_DISPLAY, get_namespace_from_config
 
 skills_app = typer.Typer(
     name="skills",
@@ -23,15 +22,6 @@ skills_app = typer.Typer(
 
 
 def build_skills_url(endpoint: str, namespace: str) -> str:
-    """Build a skills API URL.
-
-    Args:
-        endpoint: The endpoint path (e.g., "" for list, "/{skill_id}" for get)
-        namespace: The namespace
-
-    Returns:
-        Full URL for the skills API endpoint
-    """
     return f"{DISPATCH_API_BASE}/api/unstable/namespace/{namespace}/skills{endpoint}"
 
 
@@ -52,18 +42,12 @@ def search_skills(
     namespace, namespace_source = get_namespace_from_config(namespace, verify=True)
 
     # Show namespace information
-    source_display = {
-        "env": "environment variable DISPATCH_NAMESPACE",
-        "yaml": ".dispatch.yaml",
-        "cli": "command line argument",
-    }
     logger.info(
-        f"Using namespace: [bold]{namespace}[/bold] [dim](from {source_display[namespace_source]})[/dim]"
+        f"Using namespace: [bold]{namespace}[/bold] [dim](from {_NAMESPACE_SOURCE_DISPLAY[namespace_source]})[/dim]"
     )
 
-    # Get API key for authentication
-    api_key = get_api_key()
-    auth_headers = get_api_headers(api_key)
+    # Get the current bearer credential for authentication
+    auth_headers = get_auth_headers()
 
     try:
         params: dict[str, str | int] = {"limit": limit}
@@ -125,23 +109,7 @@ def search_skills(
 
     except requests.exceptions.HTTPError as e:
         if e.response.status_code == 401:
-            api_key = handle_auth_error("Invalid or expired API key")
-            # Retry once with new key
-            auth_headers = get_api_headers(api_key)
-            try:
-                response = requests.get(
-                    build_skills_url("", namespace),
-                    params=params,
-                    headers=auth_headers,
-                    timeout=30,
-                )
-                response.raise_for_status()
-                # Process result (simplified for retry)
-                result = response.json()
-                logger.info(f"Found {result.get('total', 0)} skill(s)")
-            except Exception as retry_e:
-                logger.error(f"Failed to search skills: {retry_e}")
-                raise typer.Exit(1)
+            handle_auth_error("Invalid or expired API key")
         else:
             logger.error(f"HTTP Error: {e}")
             raise typer.Exit(1)
@@ -165,17 +133,11 @@ def show_skill(
     logger = get_logger()
     namespace, namespace_source = get_namespace_from_config(namespace, verify=True)
 
-    source_display = {
-        "env": "environment variable DISPATCH_NAMESPACE",
-        "yaml": ".dispatch.yaml",
-        "cli": "command line argument",
-    }
     logger.info(
-        f"Using namespace: [bold]{namespace}[/bold] [dim](from {source_display[namespace_source]})[/dim]"
+        f"Using namespace: [bold]{namespace}[/bold] [dim](from {_NAMESPACE_SOURCE_DISPLAY[namespace_source]})[/dim]"
     )
 
-    api_key = get_api_key()
-    auth_headers = get_api_headers(api_key)
+    auth_headers = get_auth_headers()
 
     try:
         with logger.status_context(f"Fetching skill '{skill_id}'..."):
@@ -220,7 +182,7 @@ def show_skill(
         if e.response.status_code == 404:
             logger.error(f"Skill '{skill_id}' not found in namespace '{namespace}'")
         elif e.response.status_code == 401:
-            logger.error("Authentication failed. Please check your API key.")
+            handle_auth_error("Invalid or expired credential")
         else:
             logger.error(f"HTTP Error: {e}")
         raise typer.Exit(1)
@@ -254,13 +216,8 @@ def install_skill(
     logger = get_logger()
     namespace, namespace_source = get_namespace_from_config(namespace, verify=True)
 
-    source_display = {
-        "env": "environment variable DISPATCH_NAMESPACE",
-        "yaml": ".dispatch.yaml",
-        "cli": "command line argument",
-    }
     logger.info(
-        f"Using namespace: [bold]{namespace}[/bold] [dim](from {source_display[namespace_source]})[/dim]"
+        f"Using namespace: [bold]{namespace}[/bold] [dim](from {_NAMESPACE_SOURCE_DISPLAY[namespace_source]})[/dim]"
     )
 
     # Determine installation path
@@ -276,8 +233,7 @@ def install_skill(
             logger.info("Installation cancelled")
             raise typer.Exit(0)
 
-    api_key = get_api_key()
-    auth_headers = get_api_headers(api_key)
+    auth_headers = get_auth_headers()
 
     try:
         with logger.status_context(f"Downloading skill '{skill_id}'..."):
@@ -303,7 +259,7 @@ def install_skill(
         if e.response.status_code == 404:
             logger.error(f"Skill '{skill_id}' not found in namespace '{namespace}'")
         elif e.response.status_code == 401:
-            logger.error("Authentication failed. Please check your API key.")
+            handle_auth_error("Invalid or expired credential")
         else:
             logger.error(f"HTTP Error: {e}")
         raise typer.Exit(1)
@@ -345,13 +301,8 @@ def create_skill(
     logger = get_logger()
     namespace, namespace_source = get_namespace_from_config(namespace, verify=True)
 
-    source_display = {
-        "env": "environment variable DISPATCH_NAMESPACE",
-        "yaml": ".dispatch.yaml",
-        "cli": "command line argument",
-    }
     logger.info(
-        f"Using namespace: [bold]{namespace}[/bold] [dim](from {source_display[namespace_source]})[/dim]"
+        f"Using namespace: [bold]{namespace}[/bold] [dim](from {_NAMESPACE_SOURCE_DISPLAY[namespace_source]})[/dim]"
     )
 
     # Resolve content path
@@ -383,8 +334,7 @@ def create_skill(
             default="",
         )
 
-    api_key = get_api_key()
-    auth_headers = get_api_headers(api_key)
+    auth_headers = get_auth_headers()
 
     try:
         with logger.status_context(f"Creating skill '{skill_id}'..."):
@@ -420,7 +370,7 @@ def create_skill(
             )
             logger.info("Use 'dispatch skills update' to update an existing skill.")
         elif e.response.status_code == 401:
-            logger.error("Authentication failed. Please check your API key.")
+            handle_auth_error("Invalid or expired credential")
         elif e.response.status_code == 400:
             try:
                 error_detail = e.response.json().get("detail", str(e))
@@ -455,13 +405,8 @@ def update_skill(
     logger = get_logger()
     namespace, namespace_source = get_namespace_from_config(namespace, verify=True)
 
-    source_display = {
-        "env": "environment variable DISPATCH_NAMESPACE",
-        "yaml": ".dispatch.yaml",
-        "cli": "command line argument",
-    }
     logger.info(
-        f"Using namespace: [bold]{namespace}[/bold] [dim](from {source_display[namespace_source]})[/dim]"
+        f"Using namespace: [bold]{namespace}[/bold] [dim](from {_NAMESPACE_SOURCE_DISPLAY[namespace_source]})[/dim]"
     )
 
     # Build update payload
@@ -494,8 +439,7 @@ def update_skill(
         )
         raise typer.Exit(1)
 
-    api_key = get_api_key()
-    auth_headers = get_api_headers(api_key)
+    auth_headers = get_auth_headers()
 
     try:
         with logger.status_context(f"Updating skill '{skill_id}'..."):
@@ -517,7 +461,7 @@ def update_skill(
         elif e.response.status_code == 403:
             logger.error("Permission denied: you are not the owner of this skill")
         elif e.response.status_code == 401:
-            logger.error("Authentication failed. Please check your API key.")
+            handle_auth_error("Invalid or expired credential")
         else:
             logger.error(f"HTTP Error: {e}")
         raise typer.Exit(1)
@@ -545,13 +489,8 @@ def delete_skill(
     logger = get_logger()
     namespace, namespace_source = get_namespace_from_config(namespace, verify=True)
 
-    source_display = {
-        "env": "environment variable DISPATCH_NAMESPACE",
-        "yaml": ".dispatch.yaml",
-        "cli": "command line argument",
-    }
     logger.info(
-        f"Using namespace: [bold]{namespace}[/bold] [dim](from {source_display[namespace_source]})[/dim]"
+        f"Using namespace: [bold]{namespace}[/bold] [dim](from {_NAMESPACE_SOURCE_DISPLAY[namespace_source]})[/dim]"
     )
 
     if not force:
@@ -559,8 +498,7 @@ def delete_skill(
             logger.info("Deletion cancelled")
             raise typer.Exit(0)
 
-    api_key = get_api_key()
-    auth_headers = get_api_headers(api_key)
+    auth_headers = get_auth_headers()
 
     try:
         with logger.status_context(f"Deleting skill '{skill_id}'..."):
@@ -579,7 +517,7 @@ def delete_skill(
         elif e.response.status_code == 403:
             logger.error("Permission denied: you are not the owner of this skill")
         elif e.response.status_code == 401:
-            logger.error("Authentication failed. Please check your API key.")
+            handle_auth_error("Invalid or expired credential")
         else:
             logger.error(f"HTTP Error: {e}")
         raise typer.Exit(1)

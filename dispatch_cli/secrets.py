@@ -1,7 +1,7 @@
 """Local secrets management for Dispatch development mode.
 
 Secrets are stored in ~/.dispatch/secrets.yaml with references to either:
-1. macOS Keychain items (preferred, secure)
+1. System secure-store items (preferred, secure)
 2. Raw values (allowed but warns on access)
 
 Example secrets.yaml:
@@ -14,13 +14,16 @@ Example secrets.yaml:
 """
 
 import os
-import subprocess
-import sys
 from pathlib import Path
 from typing import Any
 
 import yaml
 
+from dispatch_cli.keychain import (
+    KeychainClient,
+    KeychainError,
+    default_keychain_client,
+)
 from dispatch_cli.logger import get_logger
 
 # Config paths
@@ -31,14 +34,18 @@ SECRETS_FILE = DISPATCH_DIR / "secrets.yaml"
 KEYCHAIN_SERVICE = "dispatch"
 
 
-class SecretsError(Exception):
-    """Error accessing or managing secrets."""
+def _resolve_keychain_client(
+    keychain_client: KeychainClient | None = None,
+) -> KeychainClient:
+    return keychain_client or default_keychain_client()
 
-    pass
 
-
-def _get_from_keychain(account: str) -> str | None:
-    """Get a secret from macOS Keychain.
+def _get_from_keychain(
+    account: str,
+    *,
+    keychain_client: KeychainClient | None = None,
+) -> str | None:
+    """Get a secret from the system secure store.
 
     Args:
         account: The account/item name in Keychain
@@ -46,32 +53,22 @@ def _get_from_keychain(account: str) -> str | None:
     Returns:
         The secret value, or None if not found
     """
-    if sys.platform != "darwin":
-        return None
-
     try:
-        result = subprocess.run(
-            [
-                "security",
-                "find-generic-password",
-                "-s",
-                KEYCHAIN_SERVICE,
-                "-a",
-                account,
-                "-w",  # Output password only
-            ],
-            capture_output=True,
-            text=True,
+        return _resolve_keychain_client(keychain_client).get_generic_password(
+            KEYCHAIN_SERVICE,
+            account,
         )
-        if result.returncode == 0:
-            return result.stdout.strip()
-        return None
-    except Exception:
+    except KeychainError:
         return None
 
 
-def _set_in_keychain(account: str, value: str) -> bool:
-    """Store a secret in macOS Keychain.
+def _set_in_keychain(
+    account: str,
+    value: str,
+    *,
+    keychain_client: KeychainClient | None = None,
+) -> bool:
+    """Store a secret in the system secure store.
 
     Args:
         account: The account/item name in Keychain
@@ -80,45 +77,23 @@ def _set_in_keychain(account: str, value: str) -> bool:
     Returns:
         True if successful, False otherwise
     """
-    if sys.platform != "darwin":
-        return False
-
     try:
-        # First try to delete existing item (ignore errors)
-        subprocess.run(
-            [
-                "security",
-                "delete-generic-password",
-                "-s",
-                KEYCHAIN_SERVICE,
-                "-a",
-                account,
-            ],
-            capture_output=True,
+        _resolve_keychain_client(keychain_client).set_generic_password(
+            KEYCHAIN_SERVICE,
+            account,
+            value,
         )
-
-        # Add new item
-        result = subprocess.run(
-            [
-                "security",
-                "add-generic-password",
-                "-s",
-                KEYCHAIN_SERVICE,
-                "-a",
-                account,
-                "-w",
-                value,
-            ],
-            capture_output=True,
-            text=True,
-        )
-        return result.returncode == 0
-    except Exception:
+        return True
+    except KeychainError:
         return False
 
 
-def _delete_from_keychain(account: str) -> bool:
-    """Delete a secret from macOS Keychain.
+def _delete_from_keychain(
+    account: str,
+    *,
+    keychain_client: KeychainClient | None = None,
+) -> bool:
+    """Delete a secret from the system secure store.
 
     Args:
         account: The account/item name in Keychain
@@ -126,24 +101,12 @@ def _delete_from_keychain(account: str) -> bool:
     Returns:
         True if successful (or item didn't exist), False on error
     """
-    if sys.platform != "darwin":
-        return False
-
     try:
-        result = subprocess.run(
-            [
-                "security",
-                "delete-generic-password",
-                "-s",
-                KEYCHAIN_SERVICE,
-                "-a",
-                account,
-            ],
-            capture_output=True,
+        return _resolve_keychain_client(keychain_client).delete_generic_password(
+            KEYCHAIN_SERVICE,
+            account,
         )
-        # Return True even if item wasn't found (44 = item not found)
-        return result.returncode in (0, 44)
-    except Exception:
+    except KeychainError:
         return False
 
 
@@ -176,11 +139,16 @@ def _save_secrets_config(config: dict[str, Any]) -> None:
         yaml.dump(config, f, default_flow_style=False, sort_keys=True)
 
 
-def get_secret(name: str, warn_on_raw: bool = True) -> str | None:
+def get_secret(
+    name: str,
+    warn_on_raw: bool = True,
+    *,
+    keychain_client: KeychainClient | None = None,
+) -> str | None:
     """Get a secret by name from the local secrets store.
 
     Checks ~/.dispatch/secrets.yaml for the secret config, then:
-    1. If keychain reference: fetches from macOS Keychain
+    1. If keychain reference: fetches from the system secure store
     2. If raw value: returns value (with warning if warn_on_raw=True)
     3. Falls back to environment variable
 
@@ -200,12 +168,15 @@ def get_secret(name: str, warn_on_raw: bool = True) -> str | None:
         # Check for keychain reference
         if "keychain" in secret_config:
             keychain_account = secret_config["keychain"]
-            value = _get_from_keychain(keychain_account)
+            value = _get_from_keychain(
+                keychain_account,
+                keychain_client=keychain_client,
+            )
             if value:
                 return value
             else:
                 logger.debug(
-                    f"Secret '{name}' configured for keychain but not found in Keychain"
+                    f"Secret '{name}' configured for secure store but not found"
                 )
 
         # Check for raw value
@@ -245,13 +216,19 @@ def get_all_secrets(warn_on_raw: bool = True) -> dict[str, str]:
     return result
 
 
-def add_secret(name: str, value: str, use_keychain: bool = True) -> bool:
+def add_secret(
+    name: str,
+    value: str,
+    use_keychain: bool = True,
+    *,
+    keychain_client: KeychainClient | None = None,
+) -> bool:
     """Add or update a secret in the local secrets store.
 
     Args:
         name: Secret name (e.g., "OPENAI_API_KEY" or "/shared/db-password")
         value: The secret value
-        use_keychain: If True, store in Keychain; if False, store as raw value
+        use_keychain: If True, store in the secure store; if False, store as raw value
 
     Returns:
         True if successful, False otherwise
@@ -264,13 +241,17 @@ def add_secret(name: str, value: str, use_keychain: bool = True) -> bool:
         # Replace / with - for path-style secrets
         keychain_account = f"dispatch-{name.replace('/', '-').strip('-')}"
 
-        if _set_in_keychain(keychain_account, value):
+        if _set_in_keychain(
+            keychain_account,
+            value,
+            keychain_client=keychain_client,
+        ):
             config[name] = {"keychain": keychain_account}
             _save_secrets_config(config)
-            logger.info(f"✓ Secret '{name}' stored in Keychain")
+            logger.info(f"✓ Secret '{name}' stored in the system secure store")
             return True
         else:
-            logger.error(f"Failed to store '{name}' in Keychain")
+            logger.error(f"Failed to store '{name}' in the system secure store")
             return False
     else:
         # Store as raw value (with warning)
@@ -283,10 +264,14 @@ def add_secret(name: str, value: str, use_keychain: bool = True) -> bool:
         return True
 
 
-def remove_secret(name: str) -> bool:
+def remove_secret(
+    name: str,
+    *,
+    keychain_client: KeychainClient | None = None,
+) -> bool:
     """Remove a secret from the local secrets store.
 
-    Removes from both secrets.yaml and Keychain if applicable.
+    Removes from both secrets.yaml and the system secure store if applicable.
 
     Args:
         name: Secret name to remove
@@ -305,7 +290,10 @@ def remove_secret(name: str) -> bool:
 
     # Remove from Keychain if it was stored there
     if "keychain" in secret_config:
-        _delete_from_keychain(secret_config["keychain"])
+        _delete_from_keychain(
+            secret_config["keychain"],
+            keychain_client=keychain_client,
+        )
 
     # Remove from config
     del config[name]
@@ -315,7 +303,10 @@ def remove_secret(name: str) -> bool:
     return True
 
 
-def list_secrets() -> list[dict[str, Any]]:
+def list_secrets(
+    *,
+    keychain_client: KeychainClient | None = None,
+) -> list[dict[str, Any]]:
     """List all configured secrets with their storage type.
 
     Returns:
@@ -326,8 +317,11 @@ def list_secrets() -> list[dict[str, Any]]:
 
     for name, secret_config in sorted(config.items()):
         if "keychain" in secret_config:
-            # Check if actually in keychain
-            value = _get_from_keychain(secret_config["keychain"])
+            # Check if actually in the secure store
+            value = _get_from_keychain(
+                secret_config["keychain"],
+                keychain_client=keychain_client,
+            )
             result.append(
                 {
                     "name": name,
@@ -444,12 +438,12 @@ def get_secret_sources(
                 keychain_value = _get_from_keychain(keychain_account)
                 if keychain_value:
                     result["source"] = "keychain"
-                    result["storage_type"] = f"macOS Keychain ({keychain_account})"
+                    result["storage_type"] = f"system secure store ({keychain_account})"
                     result["configured"] = True
                 else:
                     result["source"] = "keychain"
                     result["storage_type"] = (
-                        f"Keychain entry missing ({keychain_account})"
+                        f"secure-store entry missing ({keychain_account})"
                     )
                     result["configured"] = False
             elif "value" in secret_config:

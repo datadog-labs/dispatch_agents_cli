@@ -7,12 +7,12 @@ import questionary
 import requests
 import typer
 
-from dispatch_cli.auth import get_api_key, handle_auth_error
+from dispatch_cli.auth import get_auth_headers, handle_auth_error
 from dispatch_cli.logger import get_logger
 from dispatch_cli.secrets import add_secret as add_local_secret
 
 from .agent import build_namespaced_url
-from .secrets import get_namespace_from_config
+from .secrets import _NAMESPACE_SOURCE_DISPLAY, get_namespace_from_config
 
 # Maps provider to the env var name used by the provider SDK
 PROVIDER_ENV_VARS = {
@@ -33,10 +33,6 @@ VALID_PROVIDER_FORMATS = ["openai", "anthropic"]
 DEFAULT_MODELS = {
     "openai": "gpt-5",
     "anthropic": "claude-sonnet-4-5-20250929",
-    "azure_openai": "gpt-5",
-    "google": "gemini-2.0-flash",
-    "cohere": "command-r-plus",
-    "mistral": "mistral-large-latest",
 }
 
 # Popular models per provider for the setup wizard (2026)
@@ -61,12 +57,6 @@ POPULAR_MODELS: dict[str, list[str]] = {
 # Providers shown in the interactive setup wizard
 SETUP_WIZARD_PROVIDERS = ["openai", "anthropic"]
 
-_NAMESPACE_SOURCE_DISPLAY = {
-    "env": "environment variable DISPATCH_NAMESPACE",
-    "yaml": ".dispatch.yaml",
-    "cli": "command line argument",
-}
-
 
 def _resolve_namespace(namespace: str | None, logger: Any) -> str:
     """Resolve namespace from config and log the source."""
@@ -78,88 +68,6 @@ def _resolve_namespace(namespace: str | None, logger: Any) -> str:
         f"[dim](from {_NAMESPACE_SOURCE_DISPLAY[namespace_source]})[/dim]"
     )
     return resolved_namespace
-
-
-def _get_auth_headers() -> dict[str, str]:
-    """Get authorization headers using the stored API key."""
-    dispatch_api_key = get_api_key()
-    return {"Authorization": f"Bearer {dispatch_api_key}"}
-
-
-def _upload_api_key(
-    namespace: str,
-    secret_path: str,
-    api_key: str,
-    auth_headers: dict[str, str],
-    logger: Any,
-) -> dict[str, str]:
-    """Upload API key to secure storage. Returns (possibly refreshed) auth headers."""
-    try:
-        response = requests.post(
-            build_namespaced_url("/secrets/upload", namespace),
-            json={"secret_path": secret_path, "secret_value": api_key},
-            headers=auth_headers,
-            timeout=30,
-        )
-        response.raise_for_status()
-        logger.success(f"API key stored at: {secret_path}")
-        return auth_headers
-    except requests.exceptions.HTTPError as e:
-        if e.response.status_code == 401:
-            dispatch_api_key = handle_auth_error("Invalid or expired API key")
-            auth_headers = {"Authorization": f"Bearer {dispatch_api_key}"}
-            response = requests.post(
-                build_namespaced_url("/secrets/upload", namespace),
-                json={"secret_path": secret_path, "secret_value": api_key},
-                headers=auth_headers,
-                timeout=30,
-            )
-            response.raise_for_status()
-            logger.success(f"API key stored at: {secret_path}")
-            return auth_headers
-        else:
-            logger.error(f"Failed to upload API key: {e}")
-            raise typer.Exit(1)
-    except Exception as e:
-        logger.error(f"Failed to upload API key: {e}")
-        raise typer.Exit(1)
-
-
-def _configure_llm_provider(
-    namespace: str,
-    provider: str,
-    secret_path: str,
-    model: str,
-    auth_headers: dict[str, str],
-    logger: Any,
-) -> None:
-    """Configure the LLM provider with model settings."""
-    try:
-        response = requests.post(
-            build_namespaced_url(f"/llm-config/providers/{provider}", namespace),
-            json={
-                "secret_path": secret_path,
-                "default_model": model,
-                "enabled": True,
-            },
-            headers=auth_headers,
-            timeout=30,
-        )
-        response.raise_for_status()
-        logger.success(f"Provider '{provider}' configured with model '{model}'")
-    except requests.exceptions.HTTPError as e:
-        logger.error(f"Failed to configure provider: {e}")
-        if e.response:
-            try:
-                detail = e.response.json().get("detail", "")
-                if detail:
-                    logger.error(f"  Details: {detail}")
-            except Exception as parse_err:
-                logger.debug(f"Could not parse error response: {parse_err}")
-        raise typer.Exit(1)
-    except Exception as e:
-        logger.error(f"Failed to configure provider: {e}")
-        raise typer.Exit(1)
 
 
 @llm_app.command("configure")
@@ -248,7 +156,7 @@ def configure_provider(
     if not secret_path:
         secret_path = f"llm/{provider}-api-key"
 
-    auth_headers = _get_auth_headers()
+    auth_headers = get_auth_headers()
 
     # Use the single-step /setup endpoint
     logger.info(f"\nConfiguring {provider} provider...")
@@ -269,23 +177,7 @@ def configure_provider(
             timeout=30,
         )
         if response.status_code == 401:
-            dispatch_api_key = handle_auth_error("Invalid or expired API key")
-            auth_headers = {"Authorization": f"Bearer {dispatch_api_key}"}
-            response = requests.post(
-                build_namespaced_url(
-                    f"/llm-config/providers/{provider}/setup", resolved_namespace
-                ),
-                json={
-                    "api_key": api_key,
-                    "default_model": model,
-                    "scope": "org",
-                    "set_default": set_default,
-                    "allow_overwrite": False,
-                    "base_provider": provider,
-                },
-                headers=auth_headers,
-                timeout=30,
-            )
+            handle_auth_error("Invalid or expired API key")
         response.raise_for_status()
         logger.success(f"Provider '{provider}' configured with model '{model}'")
         if set_default:
@@ -335,7 +227,7 @@ def list_providers(
     """List configured LLM providers."""
     logger = get_logger()
     resolved_namespace = _resolve_namespace(namespace, logger)
-    auth_headers = _get_auth_headers()
+    auth_headers = get_auth_headers()
 
     try:
         with logger.status_context("Fetching LLM configuration..."):
@@ -372,7 +264,7 @@ def list_providers(
 
     except requests.exceptions.HTTPError as e:
         if e.response.status_code == 401:
-            logger.error("Authentication failed. Run 'dispatch login' first.")
+            handle_auth_error("Invalid or expired credential")
         else:
             logger.error(f"Failed to fetch providers: {e}")
         raise typer.Exit(1)
@@ -416,7 +308,7 @@ def test_llm(
     """
     logger = get_logger()
     resolved_namespace = _resolve_namespace(namespace, logger)
-    auth_headers = _get_auth_headers()
+    auth_headers = get_auth_headers()
 
     # Build request payload
     payload: dict = {
@@ -464,7 +356,7 @@ def test_llm(
 
     except requests.exceptions.HTTPError as e:
         if e.response.status_code == 401:
-            logger.error("Authentication failed. Run 'dispatch login' first.")
+            handle_auth_error("Invalid or expired credential")
         elif e.response.status_code == 400:
             try:
                 detail = e.response.json().get("detail", "")
@@ -507,7 +399,7 @@ def set_default_provider(
     """
     logger = get_logger()
     resolved_namespace = _resolve_namespace(namespace, logger)
-    auth_headers = _get_auth_headers()
+    auth_headers = get_auth_headers()
 
     try:
         with logger.status_context(f"Setting {provider} as default..."):
@@ -525,7 +417,7 @@ def set_default_provider(
 
     except requests.exceptions.HTTPError as e:
         if e.response.status_code == 401:
-            logger.error("Authentication failed. Run 'dispatch login' first.")
+            handle_auth_error("Invalid or expired credential")
         elif e.response.status_code == 400:
             try:
                 detail = e.response.json().get("detail", "")
@@ -577,7 +469,7 @@ def delete_provider(
             logger.info("Cancelled")
             return
 
-    auth_headers = _get_auth_headers()
+    auth_headers = get_auth_headers()
 
     try:
         with logger.status_context(f"Deleting {provider}..."):
@@ -598,7 +490,7 @@ def delete_provider(
 
     except requests.exceptions.HTTPError as e:
         if e.response.status_code == 401:
-            logger.error("Authentication failed. Run 'dispatch login' first.")
+            handle_auth_error("Invalid or expired credential")
         elif e.response.status_code == 404:
             logger.error(f"Provider '{provider}' not found")
         else:
@@ -792,7 +684,7 @@ def setup_wizard(
     set_default = False
     if store_remote:
         resolved_namespace = _resolve_namespace(namespace, logger)
-        auth_headers = _get_auth_headers()
+        auth_headers = get_auth_headers()
 
         scope = questionary.select(
             "Configuration scope:",
@@ -952,17 +844,7 @@ def setup_wizard(
                 timeout=30,
             )
             if response.status_code == 401:
-                dispatch_api_key = handle_auth_error("Invalid or expired API key")
-                auth_headers = {"Authorization": f"Bearer {dispatch_api_key}"}
-                response = requests.post(
-                    build_namespaced_url(
-                        f"/llm-config/providers/{provider}/setup",
-                        resolved_namespace,
-                    ),
-                    json=setup_payload,
-                    headers=auth_headers,
-                    timeout=30,
-                )
+                handle_auth_error("Invalid or expired API key")
             response.raise_for_status()
         except requests.exceptions.HTTPError as e:
             logger.error(f"Failed to configure remote provider: {e}")

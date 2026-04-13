@@ -17,9 +17,9 @@ uv tool install git+ssh://git@github.com/datadog-labs/dispatch_agents_cli.git --
 
 ### Authenticate
 
-Run `dispatch login` to store an API key. The user needs a Dispatch API key from the Dispatch dashboard. The key is stored securely in the system keychain.
+Run `dispatch login` to authenticate in the browser with Auth0. This is the normal path for human CLI usage and matches the web app login experience.
 
-If the user already has a `DISPATCH_API_KEY` environment variable set, that works too — the CLI will use it automatically.
+If the user is intentionally running the CLI in a machine or CI context, `DISPATCH_API_KEY` still works as an explicit override.
 
 ### Set Up LLM Providers for Local Dev
 

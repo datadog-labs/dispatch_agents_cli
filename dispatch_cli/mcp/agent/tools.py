@@ -11,7 +11,7 @@ from dispatch_agents.invocation import InvocationStatus
 from mcp.server.lowlevel import Server
 from mcp.types import TASK_REQUIRED, CallToolResult, TextContent, Tool
 
-from ..client import DispatchAPIClient
+from ..client import AgentBackendClient
 from ..config import MCPConfig
 
 # Default polling configuration for function invocation
@@ -28,7 +28,7 @@ def sanitize_tool_name(name: str) -> str:
 
 def register_agent_tools(
     server: Server,
-    client: DispatchAPIClient,
+    client: AgentBackendClient,
     config: MCPConfig,
 ):
     """Register agent-specific MCP tools based on agent functions."""

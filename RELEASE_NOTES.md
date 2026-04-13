@@ -1,1 +1,2 @@
-Bumping SDK version to latest
+## Features
+- **OAuth authentication support**: The CLI now includes an OAuth-based login flow with secure session management and system keychain integration for credential storage. Run `dispatch login` to authenticate using the new provider-backed auth system.

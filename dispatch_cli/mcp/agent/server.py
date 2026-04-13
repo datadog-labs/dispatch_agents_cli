@@ -5,19 +5,21 @@ import anyio
 from mcp.server.lowlevel import Server
 from mcp.server.stdio import stdio_server
 
-from ..client import DispatchAPIClient
+from ..client import AgentBackendClient, DispatchAPIClient
 from ..config import MCPConfig
 from .tools import register_agent_tools
 
 
-def create_agent_server(config: MCPConfig) -> Server:
+def create_agent_server(
+    config: MCPConfig,
+    client: AgentBackendClient | None = None,
+) -> Server:
     """Create and configure agent MCP server."""
     server = Server("dispatch-agent")
-
-    client = DispatchAPIClient(config)
+    resolved_client = client or DispatchAPIClient(config)
 
     # Register agent-specific function tools
-    register_agent_tools(server, client, config)
+    register_agent_tools(server, resolved_client, config)
 
     return server
 

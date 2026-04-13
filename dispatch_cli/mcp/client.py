@@ -1,5 +1,9 @@
 """Dispatch API client for MCP server."""
 
+from __future__ import annotations
+
+from typing import Any, Protocol
+
 import httpx
 
 from dispatch_cli.http_client import get_api_headers
@@ -26,6 +30,119 @@ from .models import (
 )
 
 
+class AgentBackendClient(Protocol):
+    """Backend operations needed by the agent MCP server."""
+
+    def get_agent_info(self, agent_id: str, namespace: str | None = None) -> dict: ...
+
+    async def invoke_function_async(
+        self,
+        agent_name: str,
+        function_name: str,
+        payload: dict,
+        namespace: str | None = None,
+        timeout_seconds: int | None = None,
+    ) -> dict: ...
+
+    async def get_invocation_status_async(
+        self, invocation_id: str, namespace: str | None = None
+    ) -> dict: ...
+
+
+class OperatorBackendClient(AgentBackendClient, Protocol):
+    """Backend operations needed by the operator MCP server."""
+
+    def close(self) -> None: ...
+
+    def list_namespaces(self) -> dict: ...
+
+    def list_agents(
+        self, namespace: str | None = None, limit: int = 50
+    ) -> list[dict]: ...
+
+    def delete_agent(self, agent_id: str, namespace: str | None = None) -> dict: ...
+
+    def stop_agent(
+        self, agent_name: str, namespace: str | None = None
+    ) -> StopAgentResponse: ...
+
+    def reboot_agent(
+        self, agent_name: str, namespace: str | None = None
+    ) -> RebootAgentResponse: ...
+
+    def get_agent_logs(
+        self,
+        agent_name: str,
+        version: str = "latest",
+        namespace: str | None = None,
+        limit: int = 100,
+        **kwargs: Any,
+    ) -> dict: ...
+
+    def publish_event(
+        self,
+        topic: str,
+        payload: dict,
+        namespace: str | None = None,
+        sender_id: str = "mcp-cli",
+        **kwargs: Any,
+    ) -> dict: ...
+
+    def get_topic_schema(self, topic: str, namespace: str | None = None) -> dict: ...
+
+    def list_topics(self, namespace: str) -> list[TopicListItem]: ...
+
+    def get_recent_events(
+        self,
+        namespace: str,
+        topic: str | None = None,
+        limit: int = 20,
+    ) -> list[EventRecord]: ...
+
+    def get_event_trace(self, trace_id: str, namespace: str) -> EventTraceResponse: ...
+
+    def get_recent_traces(
+        self,
+        namespace: str,
+        topic: str | None = None,
+        limit: int = 50,
+    ) -> RecentTracesResponse: ...
+
+    def get_invocation_status(
+        self, invocation_id: str, namespace: str | None = None
+    ) -> dict: ...
+
+    async def get_deploy_status_async(
+        self, job_id: str, namespace: str | None = None
+    ) -> dict: ...
+
+    def list_long_term_memories(
+        self, agent_name: str, namespace: str
+    ) -> ListLongTermMemoriesResponse: ...
+
+    async def create_schedule(
+        self, request: CreateScheduleRequest
+    ) -> CreateScheduleResponse: ...
+
+    async def list_schedules(
+        self, request: ListSchedulesRequest
+    ) -> ListSchedulesResponse: ...
+
+    async def get_schedule(
+        self, request: GetScheduleRequest
+    ) -> GetScheduleResponse: ...
+
+    async def update_schedule(
+        self, request: UpdateScheduleRequest
+    ) -> UpdateScheduleResponse: ...
+
+    async def delete_schedule(
+        self, request: DeleteScheduleRequest
+    ) -> DeleteScheduleResponse: ...
+
+    async def submit_feedback(self, payload: dict[str, Any]) -> None: ...
+
+
 class DispatchAPIClient:
     """Client for Dispatch backend API.
 
@@ -35,14 +152,17 @@ class DispatchAPIClient:
 
     def __init__(self, config: MCPConfig):
         self.config = config
-        self.headers = get_api_headers(config.api_key)
-        self.client = httpx.Client(headers=self.headers, timeout=30.0)
+        self.client = httpx.Client(timeout=30.0)
         self._async_client: httpx.AsyncClient | None = None
+
+    def close(self) -> None:
+        """Close the sync HTTP client."""
+        self.client.close()
 
     async def _get_async_client(self) -> httpx.AsyncClient:
         """Get or create the async client (lazy initialization)."""
         if self._async_client is None:
-            self._async_client = httpx.AsyncClient(headers=self.headers, timeout=30.0)
+            self._async_client = httpx.AsyncClient(timeout=30.0)
         return self._async_client
 
     async def close_async(self) -> None:
@@ -60,11 +180,25 @@ class DispatchAPIClient:
         """Build global API URL."""
         return f"{self.config.deploy_url}{endpoint}"
 
+    def _headers(self) -> dict[str, str]:
+        """Resolve fresh auth headers for each request."""
+        credential = self.config.credential_provider.resolve()
+        return get_api_headers(credential.access_token)
+
+    def _request(self, method: str, url: str, **kwargs) -> httpx.Response:
+        """Make a sync request with the current resolved credential."""
+        return self.client.request(method, url, headers=self._headers(), **kwargs)
+
+    async def _request_async(self, method: str, url: str, **kwargs) -> httpx.Response:
+        """Make an async request with the current resolved credential."""
+        client = await self._get_async_client()
+        return await client.request(method, url, headers=self._headers(), **kwargs)
+
     # Namespace Operations
     def list_namespaces(self) -> dict:
         """List all accessible namespaces."""
         url = self._global_url("/namespaces/list")
-        resp = self.client.get(url)
+        resp = self._request("GET", url)
         resp.raise_for_status()
         return resp.json()
 
@@ -72,7 +206,7 @@ class DispatchAPIClient:
     def list_agents(self, namespace: str | None = None, limit: int = 50) -> list[dict]:
         """List agents in namespace."""
         url = self._namespaced_url("/agents/list", namespace)
-        resp = self.client.get(url, params={"limit": limit})
+        resp = self._request("GET", url, params={"limit": limit})
         resp.raise_for_status()
         return resp.json()
 
@@ -80,14 +214,14 @@ class DispatchAPIClient:
         """Get agent details and schema."""
         url = self._namespaced_url(f"/agents/{agent_id}", namespace)
         # Use custom timeout for faster failure
-        resp = self.client.get(url, timeout=5.0)
+        resp = self._request("GET", url, timeout=5.0)
         resp.raise_for_status()
         return resp.json()
 
     def delete_agent(self, agent_id: str, namespace: str | None = None) -> dict:
         """Delete agent."""
         url = self._namespaced_url(f"/agents/{agent_id}", namespace)
-        resp = self.client.delete(url)
+        resp = self._request("DELETE", url)
         resp.raise_for_status()
         return resp.json()
 
@@ -96,7 +230,7 @@ class DispatchAPIClient:
     ) -> StopAgentResponse:
         """Stop agent by scaling to 0 instances and marking as disabled."""
         url = self._namespaced_url(f"/agents/{agent_name}/stop", namespace)
-        resp = self.client.post(url)
+        resp = self._request("POST", url)
         resp.raise_for_status()
         return StopAgentResponse.model_validate(resp.json())
 
@@ -105,7 +239,7 @@ class DispatchAPIClient:
     ) -> RebootAgentResponse:
         """Reboot agent by rebuilding from source and redeploying."""
         url = self._namespaced_url(f"/agents/{agent_name}/reboot", namespace)
-        resp = self.client.post(url)
+        resp = self._request("POST", url)
         resp.raise_for_status()
         return RebootAgentResponse.model_validate(resp.json())
 
@@ -120,7 +254,7 @@ class DispatchAPIClient:
         """Get agent logs from CloudWatch."""
         url = self._namespaced_url(f"/logs/{agent_name}/{version}", namespace)
         params = {"limit": limit, **kwargs}
-        resp = self.client.get(url, params=params)
+        resp = self._request("GET", url, params=params)
         resp.raise_for_status()
         return resp.json()
 
@@ -141,21 +275,21 @@ class DispatchAPIClient:
             "sender_id": sender_id,
             **kwargs,
         }
-        resp = self.client.post(url, json=data)
+        resp = self._request("POST", url, json=data)
         resp.raise_for_status()
         return resp.json()
 
     def get_topic_schema(self, topic: str, namespace: str | None = None) -> dict:
         """Get topic schema details."""
         url = self._namespaced_url(f"/events/schemas/{topic}", namespace)
-        resp = self.client.get(url)
+        resp = self._request("GET", url)
         resp.raise_for_status()
         return resp.json()
 
     def list_topics(self, namespace: str) -> list[TopicListItem]:
         """List all topics in namespace."""
         url = self._namespaced_url("/events/topics", namespace)
-        resp = self.client.get(url)
+        resp = self._request("GET", url)
         resp.raise_for_status()
         return [TopicListItem.model_validate(t) for t in resp.json()]
 
@@ -170,14 +304,14 @@ class DispatchAPIClient:
         params: dict[str, str | int] = {"limit": limit}
         if topic:
             params["topic"] = topic
-        resp = self.client.get(url, params=params)
+        resp = self._request("GET", url, params=params)
         resp.raise_for_status()
         return [EventRecord.model_validate(e) for e in resp.json()]
 
     def get_event_trace(self, trace_id: str, namespace: str) -> EventTraceResponse:
         """Get full event trace by trace ID."""
         url = self._namespaced_url(f"/events/trace/{trace_id}", namespace)
-        resp = self.client.get(url)
+        resp = self._request("GET", url)
         resp.raise_for_status()
         return EventTraceResponse.model_validate(resp.json())
 
@@ -192,7 +326,7 @@ class DispatchAPIClient:
         params: dict[str, str | int] = {"limit": limit}
         if topic:
             params["topic"] = topic
-        resp = self.client.get(url, params=params)
+        resp = self._request("GET", url, params=params)
         resp.raise_for_status()
         return RecentTracesResponse.model_validate(resp.json())
 
@@ -225,7 +359,7 @@ class DispatchAPIClient:
         }
         if timeout_seconds is not None:
             data["timeout_seconds"] = timeout_seconds
-        resp = self.client.post(url, json=data)
+        resp = self._request("POST", url, json=data)
         resp.raise_for_status()
         return resp.json()
 
@@ -242,7 +376,7 @@ class DispatchAPIClient:
             dict with status, result (if completed), error (if failed)
         """
         url = self._namespaced_url(f"/invoke/{invocation_id}", namespace)
-        resp = self.client.get(url)
+        resp = self._request("GET", url)
         resp.raise_for_status()
         return resp.json()
 
@@ -267,7 +401,7 @@ class DispatchAPIClient:
         url = self._namespaced_url(
             f"/invoke/history/{agent_name}/{function_name}", namespace
         )
-        resp = self.client.get(url, params={"limit": limit})
+        resp = self._request("GET", url, params={"limit": limit})
         resp.raise_for_status()
         return resp.json()
 
@@ -277,7 +411,7 @@ class DispatchAPIClient:
     ) -> ListLongTermMemoriesResponse:
         """List all long-term memories for an agent."""
         url = self._namespaced_url(f"/memory/long-term/agent/{agent_name}", namespace)
-        resp = self.client.get(url)
+        resp = self._request("GET", url)
         resp.raise_for_status()
         return ListLongTermMemoriesResponse.model_validate(resp.json())
 
@@ -302,7 +436,6 @@ class DispatchAPIClient:
         Returns:
             dict with invocation_id and initial status
         """
-        client = await self._get_async_client()
         url = self._namespaced_url("/invoke", namespace)
         data: dict[str, str | dict | int] = {
             "agent_name": agent_name,
@@ -311,7 +444,7 @@ class DispatchAPIClient:
         }
         if timeout_seconds is not None:
             data["timeout_seconds"] = timeout_seconds
-        resp = await client.post(url, json=data)
+        resp = await self._request_async("POST", url, json=data)
         resp.raise_for_status()
         return resp.json()
 
@@ -327,9 +460,8 @@ class DispatchAPIClient:
         Returns:
             dict with status, result (if completed), error (if failed)
         """
-        client = await self._get_async_client()
         url = self._namespaced_url(f"/invoke/{invocation_id}", namespace)
-        resp = await client.get(url)
+        resp = await self._request_async("GET", url)
         resp.raise_for_status()
         return resp.json()
 
@@ -346,9 +478,8 @@ class DispatchAPIClient:
         Returns:
             dict with status, version, stages, logs, and error fields
         """
-        client = await self._get_async_client()
         url = self._namespaced_url(f"/agents/deployments/{job_id}", namespace)
-        resp = await client.get(url)
+        resp = await self._request_async("GET", url)
         resp.raise_for_status()
         return resp.json()
 
@@ -364,7 +495,6 @@ class DispatchAPIClient:
         Returns:
             CreateScheduleResponse with schedule_id and message
         """
-        client = await self._get_async_client()
         url = self._namespaced_url("/schedules", request.namespace)
         data: dict = {
             "agent_name": request.agent_name,
@@ -378,7 +508,7 @@ class DispatchAPIClient:
             data["description"] = request.description
         if request.timeout_seconds is not None:
             data["timeout_seconds"] = request.timeout_seconds
-        resp = await client.post(url, json=data)
+        resp = await self._request_async("POST", url, json=data)
         resp.raise_for_status()
         return CreateScheduleResponse.model_validate(resp.json())
 
@@ -393,12 +523,11 @@ class DispatchAPIClient:
         Returns:
             ListSchedulesResponse with schedules list and total count
         """
-        client = await self._get_async_client()
         url = self._namespaced_url("/schedules", request.namespace)
         params = {}
         if request.agent_name:
             params["agent_name"] = request.agent_name
-        resp = await client.get(url, params=params)
+        resp = await self._request_async("GET", url, params=params)
         resp.raise_for_status()
         return ListSchedulesResponse.model_validate(resp.json())
 
@@ -411,11 +540,10 @@ class DispatchAPIClient:
         Returns:
             GetScheduleResponse with schedule details
         """
-        client = await self._get_async_client()
         url = self._namespaced_url(
             f"/schedules/{request.schedule_id}", request.namespace
         )
-        resp = await client.get(url)
+        resp = await self._request_async("GET", url)
         resp.raise_for_status()
         return GetScheduleResponse.model_validate(resp.json())
 
@@ -430,7 +558,6 @@ class DispatchAPIClient:
         Returns:
             UpdateScheduleResponse with updated schedule details
         """
-        client = await self._get_async_client()
         url = self._namespaced_url(
             f"/schedules/{request.schedule_id}", request.namespace
         )
@@ -445,7 +572,7 @@ class DispatchAPIClient:
             data["description"] = request.description
         if request.is_paused is not None:
             data["is_paused"] = request.is_paused
-        resp = await client.patch(url, json=data)
+        resp = await self._request_async("PATCH", url, json=data)
         resp.raise_for_status()
         return UpdateScheduleResponse.model_validate(resp.json())
 
@@ -460,10 +587,20 @@ class DispatchAPIClient:
         Returns:
             DeleteScheduleResponse with confirmation message
         """
-        client = await self._get_async_client()
         url = self._namespaced_url(
             f"/schedules/{request.schedule_id}", request.namespace
         )
-        resp = await client.delete(url)
+        resp = await self._request_async("DELETE", url)
         resp.raise_for_status()
         return DeleteScheduleResponse.model_validate(resp.json())
+
+    async def submit_feedback(self, payload: dict[str, Any]) -> None:
+        """Submit platform feedback asynchronously."""
+        url = self._global_url("/feedback/")
+        resp = await self._request_async("POST", url, json=payload)
+        resp.raise_for_status()
+
+
+def default_operator_backend_client(config: MCPConfig) -> OperatorBackendClient:
+    """Build the default operator backend client for MCP runtime paths."""
+    return DispatchAPIClient(config)
