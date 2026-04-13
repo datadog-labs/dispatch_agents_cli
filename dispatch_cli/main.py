@@ -2,9 +2,14 @@
 
 from importlib.metadata import version as _version
 
-import questionary
 import typer
 
+from .auth_login import default_login_flow
+from .auth_provider import MissingAuthenticationError, default_credential_provider
+from .auth_session import (
+    InvalidAuthSessionError,
+    default_auth_session_store,
+)
 from .commands.agent import agent_app
 from .commands.llm import llm_app
 from .commands.mcp import mcp_app
@@ -85,53 +90,100 @@ def version():
 
 @app.command()
 def login(
-    api_key: str = typer.Option(
-        None, "--api-key", help="API key to store (if not provided, will prompt)"
+    org: str | None = typer.Option(
+        None, "--org", help="Organization ID to use for browser auth"
     ),
 ):
-    """Store your API key securely in the system keychain."""
-    from .auth import store_api_key_in_keychain, validate_api_key
+    """Authenticate the CLI in the browser."""
     from .logger import get_logger
 
     logger = get_logger()
 
-    # If no API key provided, prompt for it
-    if not api_key:
-        logger.info("Please enter your Dispatch API key.")
+    try:
+        session_store = default_auth_session_store()
+        login_flow = default_login_flow()
+        with logger.status_context("Starting browser auth..."):
+            session = login_flow.login(org_id=org)
+        session_store.save(session)
+    except Exception as exc:
+        logger.error(f"Login failed: {exc}")
+        raise typer.Exit(1) from exc
+
+    logger.success("Logged in with browser auth")
+    if session.user_email:
+        logger.info(f"User: {session.user_email}")
+    if session.org_display_name and session.org_id:
+        logger.info(f"Organization: {session.org_display_name} ({session.org_id})")
+    elif session.org_id:
+        logger.info(f"Organization: {session.org_id}")
+
+
+@app.command()
+def logout():
+    """Clear the locally stored OAuth session."""
+    from .logger import get_logger
+
+    logger = get_logger()
+    try:
+        session_store = default_auth_session_store()
+    except InvalidAuthSessionError as exc:
+        logger.error(str(exc))
+        raise typer.Exit(1) from exc
+
+    try:
+        existing_session = session_store.load()
+    except InvalidAuthSessionError:
+        session_store.clear()
+        logger.success("Cleared invalid local OAuth session")
+        return
+
+    if existing_session is None:
+        logger.info("No local OAuth session found")
+        return
+
+    session_store.clear()
+    logger.success("Logged out")
+
+
+@app.command()
+def whoami():
+    """Show the current CLI authentication context."""
+    from .logger import get_logger
+
+    logger = get_logger()
+
+    try:
+        provider = default_credential_provider()
+        credential = provider.resolve()
+    except InvalidAuthSessionError as exc:
+        logger.warning(str(exc))
+        return
+    except MissingAuthenticationError as exc:
+        logger.warning(str(exc))
+        return
+
+    logger.info(f"Auth mode: {credential.auth_mode}")
+    if credential.auth_mode == "api_key":
+        logger.info("Identity: machine auth override via DISPATCH_API_KEY")
+        return
+
+    if credential.user_email:
+        logger.info(f"User: {credential.user_email}")
+    if credential.org_display_name and credential.org_id:
         logger.info(
-            f"You can create one at: [link={DISPATCH_API_BASE}/manage/api-keys]{DISPATCH_API_BASE}/manage/api-keys[/link]\n"
+            f"Organization: {credential.org_display_name} ({credential.org_id})"
         )
-        api_key = questionary.password("API Key:").ask()
-        if not api_key:
-            logger.error("API key cannot be empty")
-            raise typer.Exit(1)
+    elif credential.org_id:
+        logger.info(f"Organization: {credential.org_id}")
 
-    api_key = api_key.strip()
-
-    if not api_key:
-        logger.error("API key cannot be empty")
-        raise typer.Exit(1)
-
-    # Validate the API key
-    with logger.status_context("Validating API key..."):
-        if not validate_api_key(api_key, DISPATCH_API_BASE):
-            logger.error("Invalid API key")
-            logger.info("Please check your API key and try again.")
-            raise typer.Exit(1)
-
-    # Store in keychain
-    if store_api_key_in_keychain(api_key, DISPATCH_API_BASE):
-        logger.success("API key stored securely in system keychain")
-        logger.info(
-            "You can now use dispatch commands without setting DISPATCH_API_KEY"
-        )
-    else:
-        logger.warning("Could not store API key in keychain")
-        logger.info(
-            "You may need to set the DISPATCH_API_KEY environment variable instead:"
-        )
-        logger.code(f"export DISPATCH_API_KEY={api_key}", language="bash")
-        raise typer.Exit(1)
+    try:
+        session = default_auth_session_store().load()
+        if session:
+            logger.info(f"Session expires: {session.expires_at}")
+    except InvalidAuthSessionError as exc:
+        logger.debug(f"Could not load session expiry details: {exc}")
+    except Exception as exc:
+        logger.debug(f"Could not load session expiry details: {exc}")
 
 
 @app.command()

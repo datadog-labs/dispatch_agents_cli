@@ -16,8 +16,8 @@ from rich.progress import (
 )
 from rich.table import Table
 
-from dispatch_cli.auth import get_api_key, handle_auth_error
-from dispatch_cli.http_client import get_api_headers
+from dispatch_cli.auth import get_auth_headers, handle_auth_error
+from dispatch_cli.http_client import request_json
 from dispatch_cli.logger import get_logger
 from dispatch_cli.secrets import (
     add_secret as add_local_secret,
@@ -34,33 +34,26 @@ from dispatch_cli.utils import (
     validate_dispatch_project,
 )
 
-from .agent import DISPATCH_DEPLOY_URL, build_namespaced_url
+from .agent import build_namespaced_url
+
+_NAMESPACE_REQUIRED_MESSAGE = (
+    "Namespace is required. "
+    "Configure it in dispatch.yaml, set DISPATCH_NAMESPACE environment variable, or provide via --namespace option."
+)
 
 
 def get_namespace_from_config(
     namespace: str | None, path: str = ".", verify: bool = False
 ) -> tuple[str, str]:
-    """Get namespace from environment, CLI argument, or config file.
-
-    Args:
-        namespace: CLI argument namespace
-        path: Path to project directory
-        verify: Whether to verify namespace exists via API
-
-    Returns:
-        tuple: (namespace, source) where source is one of: 'env', 'cli', 'yaml'
-    """
-    # Check environment variable first (highest precedence)
+    """Resolve namespace from env, CLI arg, or config file. Returns (namespace, source)."""
     env_namespace = os.environ.get("DISPATCH_NAMESPACE")
     if env_namespace:
         resolved_namespace = env_namespace
         source = "env"
     elif namespace:
-        # Then check CLI argument
         resolved_namespace = namespace
         source = "cli"
     else:
-        # Finally try to load from dispatch.yaml
         logger = get_logger()
         try:
             config = load_dispatch_config(path)
@@ -69,32 +62,22 @@ def get_namespace_from_config(
                 resolved_namespace = config_namespace
                 source = "yaml"
             else:
-                logger.error(
-                    "Namespace is required. "
-                    "Configure it in .dispatch.yaml, set DISPATCH_NAMESPACE environment variable, or provide via --namespace option."
-                )
+                logger.error(_NAMESPACE_REQUIRED_MESSAGE)
                 raise typer.Exit(1)
+        except typer.Exit:
+            raise
         except Exception:
-            logger.error(
-                "Namespace is required. "
-                "Configure it in .dispatch.yaml, set DISPATCH_NAMESPACE environment variable, or provide via --namespace option."
-            )
+            logger.error(_NAMESPACE_REQUIRED_MESSAGE)
             raise typer.Exit(1)
 
-    # Verify namespace exists if requested
     if verify and resolved_namespace != "default":
-        api_key = get_api_key()
-        auth_headers = get_api_headers(api_key)
-
+        auth_headers = get_auth_headers()
         try:
-            # Check if namespace exists
-            response = requests.get(
-                f"{DISPATCH_DEPLOY_URL}/namespaces/list",
-                headers=auth_headers,
-                timeout=30,
+            result = request_json(
+                "GET",
+                f"{DISPATCH_API_BASE}/api/unstable/namespaces/list",
+                auth_headers=auth_headers,
             )
-            response.raise_for_status()
-            result = response.json()
             available_namespaces = result.get("namespaces", [])
 
             if resolved_namespace not in available_namespaces:
@@ -109,7 +92,6 @@ def get_namespace_from_config(
                         "No namespaces available. Contact your org admin to create one."
                     )
                 raise typer.Exit(1)
-
         except requests.exceptions.RequestException as e:
             logger = get_logger()
             logger.warning(f"Could not verify namespace exists: {e}")
@@ -117,6 +99,12 @@ def get_namespace_from_config(
 
     return resolved_namespace, source
 
+
+_NAMESPACE_SOURCE_DISPLAY = {
+    "env": "environment variable DISPATCH_NAMESPACE",
+    "yaml": "dispatch.yaml",
+    "cli": "command line argument",
+}
 
 secrets_app = typer.Typer(
     name="secret",
@@ -146,13 +134,8 @@ def manage_secrets(
 
     # Show namespace information to user
     logger = get_logger()
-    source_display = {
-        "env": "environment variable DISPATCH_NAMESPACE",
-        "yaml": ".dispatch.yaml",
-        "cli": "command line argument",
-    }
     logger.info(
-        f"Using namespace: [bold]{namespace}[/bold] [dim](from {source_display[namespace_source]})[/dim]"
+        f"Using namespace: [bold]{namespace}[/bold] [dim](from {_NAMESPACE_SOURCE_DISPLAY[namespace_source]})[/dim]"
     )
 
     secrets_config = config.get("secrets", [])
@@ -207,43 +190,23 @@ def manage_secrets(
     remote_status = {}
     if upload:
         logger.debug("Checking remote secrets status...")
-        api_key = get_api_key()
-        auth_headers = {"Authorization": f"Bearer {api_key}"}
+        auth_headers = get_auth_headers()
 
         # Get list of secret_ids to check
         secret_ids = [secret["secret_id"] for secret in secrets_config]
 
         try:
-            response = requests.post(
+            check_result = request_json(
+                "POST",
                 build_namespaced_url("/secrets/check", namespace),
+                auth_headers=auth_headers,
                 json={"secret_paths": secret_ids},
-                headers=auth_headers,
-                timeout=30,
             )
-            response.raise_for_status()
-            check_result = response.json()
             for secret_status in check_result["secrets"]:
                 remote_status[secret_status["secret_path"]] = secret_status["exists"]
         except requests.exceptions.HTTPError as e:
             if e.response.status_code == 401:
-                api_key = handle_auth_error("Invalid or expired API key")
-                auth_headers = {"Authorization": f"Bearer {api_key}"}
-                # Retry
-                try:
-                    response = requests.post(
-                        build_namespaced_url("/secrets/check", namespace),
-                        json={"secret_paths": secret_ids},
-                        headers=auth_headers,
-                        timeout=30,
-                    )
-                    response.raise_for_status()
-                    check_result = response.json()
-                    for secret_status in check_result["secrets"]:
-                        remote_status[secret_status["secret_path"]] = secret_status[
-                            "exists"
-                        ]
-                except Exception as retry_e:
-                    logger.warning(f"Could not check remote secrets: {retry_e}")
+                handle_auth_error("Invalid or expired API key")
             else:
                 logger.warning(f"Could not check remote secrets: {e}")
         except Exception as e:
@@ -279,8 +242,7 @@ def manage_secrets(
 
     # Prepare secrets to upload (filter and confirm)
     logger.debug("Preparing secrets for upload...")
-    api_key = get_api_key()
-    auth_headers = {"Authorization": f"Bearer {api_key}"}
+    auth_headers = get_auth_headers()
 
     secrets_to_upload = []
     for secret in secrets_config:
@@ -325,38 +287,22 @@ def manage_secrets(
     # Upload with progress bar
     logger.info(f"Uploading {len(secrets_to_upload)} secret(s)...")
 
-    def upload_secret(
-        name: str, secret_id: str, value: str, headers: dict
-    ) -> tuple[bool, dict]:
-        """Upload a single secret and return success status and updated headers."""
+    def upload_secret_value(name: str, secret_id: str, value: str) -> bool:
+        """Upload a single secret and return whether it succeeded."""
         try:
-            response = requests.post(
+            request_json(
+                "POST",
                 build_namespaced_url("/secrets/upload", namespace),
+                auth_headers=auth_headers,
                 json={"secret_path": secret_id, "secret_value": value},
-                headers=headers,
-                timeout=30,
             )
-            response.raise_for_status()
-            return True, headers
+            return True
         except requests.exceptions.HTTPError as e:
             if e.response.status_code == 401:
-                # Handle auth error and retry once
-                new_api_key = handle_auth_error("Invalid or expired API key")
-                new_headers = {"Authorization": f"Bearer {new_api_key}"}
-                try:
-                    response = requests.post(
-                        build_namespaced_url("/secrets/upload", namespace),
-                        json={"secret_path": secret_id, "secret_value": value},
-                        headers=new_headers,
-                        timeout=30,
-                    )
-                    response.raise_for_status()
-                    return True, new_headers
-                except Exception:
-                    return False, new_headers
-            return False, headers
+                handle_auth_error("Invalid or expired API key")
+            return False
         except Exception:
-            return False, headers
+            return False
 
     # Use Rich progress bar
     with Progress(
@@ -372,7 +318,7 @@ def manage_secrets(
         for name, secret_id, value, remote_exists in secrets_to_upload:
             progress.update(task, description=f"Uploading {name}...")
 
-            success, auth_headers = upload_secret(name, secret_id, value, auth_headers)
+            success = upload_secret_value(name, secret_id, value)
             if success:
                 action = "Overwritten" if remote_exists else "Uploaded"
                 logger.success(f"{name} {action.lower()} successfully")
@@ -409,35 +355,26 @@ def upload_secret(
     namespace, namespace_source = get_namespace_from_config(namespace, verify=True)
 
     # Show namespace information to user
-    source_display = {
-        "env": "environment variable DISPATCH_NAMESPACE",
-        "yaml": ".dispatch.yaml",
-        "cli": "command line argument",
-    }
     logger.info(
-        f"Using namespace: [bold]{namespace}[/bold] [dim](from {source_display[namespace_source]})[/dim]"
+        f"Using namespace: [bold]{namespace}[/bold] [dim](from {_NAMESPACE_SOURCE_DISPLAY[namespace_source]})[/dim]"
     )
     logger.debug(f"Uploading secret: {secret_path}")
 
-    # Get API key for authentication
-    api_key = get_api_key()
-    auth_headers = {"Authorization": f"Bearer {api_key}"}
+    # Get the current bearer credential for authentication
+    auth_headers = get_auth_headers()
 
     try:
         with logger.status_context("Uploading secret..."):
-            response = requests.post(
+            result = request_json(
+                "POST",
                 build_namespaced_url("/secrets/upload", namespace),
+                auth_headers=auth_headers,
                 json={
                     "namespace": namespace,
                     "secret_path": secret_path,
                     "secret_value": secret_value,
                 },
-                headers=auth_headers,
-                timeout=30,
             )
-            response.raise_for_status()
-
-        result = response.json()
         if result.get("success"):
             logger.success(result.get("message", "Secret uploaded successfully"))
         else:
@@ -446,7 +383,7 @@ def upload_secret(
 
     except requests.exceptions.HTTPError as e:
         if e.response.status_code == 401:
-            logger.error("Authentication failed. Please check your API key.")
+            handle_auth_error("Invalid or expired credential")
         else:
             logger.error(f"HTTP Error: {e}")
         raise typer.Exit(1)
@@ -470,30 +407,21 @@ def list_secrets(
     namespace, namespace_source = get_namespace_from_config(namespace, verify=True)
 
     # Show namespace information to user
-    source_display = {
-        "env": "environment variable DISPATCH_NAMESPACE",
-        "yaml": ".dispatch.yaml",
-        "cli": "command line argument",
-    }
     logger.info(
-        f"Using namespace: [bold]{namespace}[/bold] [dim](from {source_display[namespace_source]})[/dim]"
+        f"Using namespace: [bold]{namespace}[/bold] [dim](from {_NAMESPACE_SOURCE_DISPLAY[namespace_source]})[/dim]"
     )
 
-    # Get API key for authentication
-    api_key = get_api_key()
-    auth_headers = {"Authorization": f"Bearer {api_key}"}
+    # Get the current bearer credential for authentication
+    auth_headers = get_auth_headers()
 
     try:
         with logger.status_context("Fetching secrets..."):
-            response = requests.get(
+            result = request_json(
+                "GET",
                 build_namespaced_url("/secrets/list", namespace),
+                auth_headers=auth_headers,
                 params={"namespace": namespace},
-                headers=auth_headers,
-                timeout=30,
             )
-            response.raise_for_status()
-
-        result = response.json()
         secrets = result.get("secrets", [])
 
         if not secrets:
@@ -507,7 +435,7 @@ def list_secrets(
 
     except requests.exceptions.HTTPError as e:
         if e.response.status_code == 401:
-            logger.error("Authentication failed. Please check your API key.")
+            handle_auth_error("Invalid or expired credential")
         else:
             logger.error(f"HTTP Error: {e}")
         raise typer.Exit(1)
@@ -532,13 +460,8 @@ def check_secrets(
     namespace, namespace_source = get_namespace_from_config(namespace, verify=True)
 
     # Show namespace information to user
-    source_display = {
-        "env": "environment variable DISPATCH_NAMESPACE",
-        "yaml": ".dispatch.yaml",
-        "cli": "command line argument",
-    }
     logger.info(
-        f"Using namespace: [bold]{namespace}[/bold] [dim](from {source_display[namespace_source]})[/dim]"
+        f"Using namespace: [bold]{namespace}[/bold] [dim](from {_NAMESPACE_SOURCE_DISPLAY[namespace_source]})[/dim]"
     )
 
     if not secret_paths:
@@ -547,21 +470,16 @@ def check_secrets(
 
     logger.debug(f"Checking {len(secret_paths)} secret(s)...")
 
-    # Get API key for authentication
-    api_key = get_api_key()
-    auth_headers = {"Authorization": f"Bearer {api_key}"}
+    auth_headers = get_auth_headers()
 
     try:
         with logger.status_context("Checking secrets..."):
-            response = requests.post(
+            result = request_json(
+                "POST",
                 build_namespaced_url("/secrets/check", namespace),
+                auth_headers=auth_headers,
                 json={"secret_paths": secret_paths},
-                headers=auth_headers,
-                timeout=30,
             )
-            response.raise_for_status()
-
-        result = response.json()
         secrets_status = result.get("secrets", [])
 
         found_count = 0
@@ -586,7 +504,7 @@ def check_secrets(
 
     except requests.exceptions.HTTPError as e:
         if e.response.status_code == 401:
-            logger.error("Authentication failed. Please check your API key.")
+            handle_auth_error("Invalid or expired credential")
         else:
             logger.error(f"HTTP Error: {e}")
         raise typer.Exit(1)
@@ -627,13 +545,13 @@ def local_add_secret(
         bool,
         typer.Option(
             "--no-keychain",
-            help="Store as raw text instead of in macOS Keychain (not recommended)",
+            help="Store as raw text instead of in the system secure store (not recommended)",
         ),
     ] = False,
 ):
     """Add or update a local secret for development mode.
 
-    By default, secrets are stored securely in macOS Keychain with a reference
+    By default, secrets are stored in the system secure store with a reference
     in ~/.dispatch/secrets.yaml. Use --no-keychain to store as raw text (warns on access).
 
     Examples:
@@ -657,11 +575,15 @@ def local_add_secret(
         logger.error("Secret value cannot be empty")
         raise typer.Exit(1)
 
-    # Use keychain by default on macOS
+    # Use the native secure store on supported platforms.
     use_keychain = not no_keychain
-    if use_keychain and sys.platform != "darwin":
+    if (
+        use_keychain
+        and sys.platform != "darwin"
+        and not sys.platform.startswith("linux")
+    ):
         logger.warning(
-            "Keychain is only available on macOS. Storing as raw value instead."
+            "The system secure store is only supported on macOS and Linux. Storing as raw value instead."
         )
         use_keychain = False
 
@@ -697,7 +619,7 @@ def local_list_secrets():
         storage = secret["storage"]
         configured = secret["configured"]
 
-        storage_display = "🔐 Keychain" if storage == "keychain" else "📝 Raw text"
+        storage_display = "🔐 Secure store" if storage == "keychain" else "📝 Raw text"
         status = "✓ Configured" if configured else "✗ Missing"
         status_style = "green" if configured else "red"
 
@@ -713,7 +635,7 @@ def local_list_secrets():
     if raw_secrets:
         logger.warning(
             f"\n⚠️  {len(raw_secrets)} secret(s) stored as raw text. "
-            "Consider migrating to Keychain for better security:"
+            "Consider migrating to the secure store for better security:"
         )
         for secret in raw_secrets:
             logger.info(f"    dispatch secret local add {secret['name']}")
@@ -728,7 +650,7 @@ def local_remove_secret(
 ):
     """Remove a local secret from development mode storage.
 
-    Removes the secret from ~/.dispatch/secrets.yaml and from macOS Keychain
+    Removes the secret from ~/.dispatch/secrets.yaml and from the system secure store
     if it was stored there.
     """
     success = remove_local_secret(name)

@@ -22,7 +22,7 @@ Use this to skip steps you've already completed:
 uv tool install git+ssh://git@github.com/datadog-labs/dispatch_agents_cli.git --upgrade
 ```
 
-Verify with `dispatch version`. If the user isn't authenticated, run `dispatch login` (prompts for an API key from https://dispatchagents.ai).
+Verify with `dispatch version`. If the user isn't authenticated, run `dispatch login` to complete the browser-based Auth0 flow.
 
 ## Step 2: Register the MCP Operator
 

@@ -33,11 +33,12 @@ from rich.status import Status
 from rich.table import Table
 from watchfiles import PythonFilter, watch
 
-from dispatch_cli.auth import get_api_key, handle_auth_error
+from dispatch_cli.auth import get_auth_headers, handle_auth_error
 from dispatch_cli.commands.router import (
     get_active_router,
     start_router_background,
 )
+from dispatch_cli.http_client import request_json
 from dispatch_cli.logger import get_logger
 from dispatch_cli.registry import (
     add_agent_to_registry,
@@ -50,7 +51,6 @@ from dispatch_cli.secrets import print_secret_sources
 from dispatch_cli.utils import (
     DEFAULT_BASE_IMAGE,
     DISPATCH_API_BASE,
-    DISPATCH_DEPLOY_URL,
     DISPATCH_DIR,
     DISPATCH_LISTENER_FILE,
     LLM_PROVIDER_KEY_NAMES,
@@ -486,29 +486,24 @@ def parallel_multipart_upload(
     return completed_parts
 
 
+_NAMESPACED_PREFIXES = (
+    "/agents",
+    "/events",
+    "/llm-config",
+    "/llm",
+    "/logs",
+    "/memory",
+    "/secrets",
+    "/tools",
+)
+
+
 def build_namespaced_url(endpoint: str, namespace: str) -> str:
-    """Build a namespaced API URL for deployment endpoints.
-
-    Converts /agents/* endpoints to /api/unstable/namespace/{namespace}/agents/*
-    """
-    namespaced_resources = [
-        "/agents",
-        "/events",
-        "/llm-config",
-        "/llm",
-        "/logs",
-        "/memory",
-        "/secrets",
-        "/tools",
-    ]
-
-    # Check if this endpoint uses a namespaced resource
-    for resource in namespaced_resources:
-        if endpoint.startswith(resource):
+    """Build a namespaced API URL for deployment endpoints."""
+    for prefix in _NAMESPACED_PREFIXES:
+        if endpoint.startswith(prefix):
             return f"{DISPATCH_API_BASE}/api/unstable/namespace/{namespace}{endpoint}"
-
-    # Not a namespaced resource - use standard URL
-    return f"{DISPATCH_DEPLOY_URL}{endpoint}"
+    raise ValueError(f"Unmapped endpoint prefix: {endpoint!r}")
 
 
 def uv_is_installed() -> bool:
@@ -1297,90 +1292,60 @@ def generate_schemas_for_dev(abs_path: str, agent_name: str) -> None:
             logger.warning(f"Schema extraction error: {e}")
 
 
-def validate_namespace(
-    namespace: str, auth_headers: dict[str, str]
-) -> tuple[bool, dict[str, str]]:
-    """Validate that the namespace exists for the user's organization.
-
-    Returns:
-        Tuple of (success, updated_auth_headers). The auth_headers may be updated
-        if re-authentication was required.
-    """
+def validate_namespace(namespace: str, auth_headers: dict[str, str]) -> bool:
+    """Validate that the namespace exists for the user's organization."""
     logger = get_logger()
-    max_retries = 2
-
-    for attempt in range(max_retries):
-        try:
-            with Status("Validating namespace...", spinner="dots"):
-                response = requests.get(
-                    f"{DISPATCH_API_BASE}/api/unstable/namespaces/list",
-                    headers=auth_headers,
-                    timeout=30,
-                )
-                response.raise_for_status()
-
-                namespaces_data = response.json()
-                valid_namespaces = namespaces_data.get("namespaces", [])
-
-                if namespace in valid_namespaces:
-                    return True, auth_headers
-
-            # Namespace doesn't exist - show available namespaces and fail
-            logger.error(
-                f"Namespace '{namespace}' does not exist in your organization."
+    try:
+        with Status("Validating namespace...", spinner="dots"):
+            namespaces_data = request_json(
+                "GET",
+                f"{DISPATCH_API_BASE}/api/unstable/namespaces/list",
+                auth_headers=auth_headers,
             )
+            valid_namespaces = namespaces_data.get("namespaces", [])
 
-            if valid_namespaces:
-                logger.info("")
-                logger.info("Available namespaces:")
-                for ns in sorted(valid_namespaces):
-                    logger.info(f"  • {ns}")
-                logger.info("")
-                logger.info(
-                    "Please update the 'namespace' field in your dispatch.yaml "
-                    "to use one of the namespaces above."
-                )
-            else:
-                logger.warning("No namespaces found in your organization.")
-                logger.info(
-                    "Please contact your organization admin to create a namespace."
-                )
+            if namespace in valid_namespaces:
+                return True
 
-            return False, auth_headers
+        # Namespace doesn't exist - show available namespaces and fail
+        logger.error(f"Namespace '{namespace}' does not exist in your organization.")
 
-        except requests.exceptions.HTTPError as e:
-            if e.response.status_code == 401:
-                if attempt < max_retries - 1:
-                    # Re-authenticate and retry
-                    api_key = handle_auth_error("Invalid or expired API key")
-                    auth_headers = {"Authorization": f"Bearer {api_key}"}
-                    continue
-                else:
-                    logger.error("Authentication failed after retries")
-                    return False, auth_headers
-            else:
-                logger.error(f"Failed to validate namespace: {e}")
-                return False, auth_headers
-        except Exception as e:
-            logger.error(f"Failed to validate namespace: {e}")
-            return False, auth_headers
+        if valid_namespaces:
+            logger.info("")
+            logger.info("Available namespaces:")
+            for ns in sorted(valid_namespaces):
+                logger.info(f"  • {ns}")
+            logger.info("")
+            logger.info(
+                "Please update the 'namespace' field in your dispatch.yaml "
+                "to use one of the namespaces above."
+            )
+        else:
+            logger.warning("No namespaces found in your organization.")
+            logger.info("Please contact your organization admin to create a namespace.")
 
-    return False, auth_headers
+        return False
+
+    except requests.exceptions.HTTPError as e:
+        if e.response.status_code == 401:
+            handle_auth_error("Invalid or expired API key")
+        logger.error(f"Failed to validate namespace: {e}")
+        return False
+    except Exception as e:
+        logger.error(f"Failed to validate namespace: {e}")
+        return False
 
 
 def check_required_secrets(
-    config: dict, auth_headers: dict[str, str], namespace: str
-) -> tuple[bool, dict[str, str]]:
-    """Check if all required secrets from the YAML config exist in remote storage.
-
-    Returns:
-        Tuple of (success, updated_auth_headers). The auth_headers may be updated
-        if re-authentication was required.
-    """
+    config: dict,
+    auth_headers: dict[str, str],
+    namespace: str,
+) -> bool:
+    """Check if all required secrets from the YAML config exist in remote storage."""
     logger = get_logger()
     secrets_config = config.get("secrets", [])
     if not secrets_config:
-        return True, auth_headers  # No secrets required
+        return True  # No secrets required
 
     logger.info("Checking required secrets...")
 
@@ -1394,73 +1359,55 @@ def check_required_secrets(
             secret_paths.append(secret["secret_id"])
 
     if not secret_paths:
-        return True, auth_headers  # No secret paths to check
+        return True  # No secret paths to check
 
-    max_retries = 2
-    for attempt in range(max_retries):
-        try:
-            # Check secrets existence using the backend API
-            with Status("Checking secrets...", spinner="dots"):
-                check_response = requests.post(
-                    build_namespaced_url("/secrets/check", namespace),
-                    json={"secret_paths": secret_paths},
-                    headers=auth_headers,
-                    timeout=30,
-                )
-                check_response.raise_for_status()
+    try:
+        # Check secrets existence using the backend API
+        with Status("Checking secrets...", spinner="dots"):
+            check_result = request_json(
+                "POST",
+                build_namespaced_url("/secrets/check", namespace),
+                auth_headers=auth_headers,
+                json={"secret_paths": secret_paths},
+            )
+        missing_secrets = []
+        error_secrets = []
 
-            check_result = check_response.json()
-            missing_secrets = []
-            error_secrets = []
-
-            for secret_status in check_result.get("secrets", []):
-                if not secret_status.get("exists", False):
-                    if secret_status.get("error"):
-                        error_secrets.append(
-                            f"  • {secret_status['secret_path']}: "
-                            f"{secret_status['error']}"
-                        )
-                    else:
-                        missing_secrets.append(f"  • {secret_status['secret_path']}")
-
-            if error_secrets:
-                logger.error("Errors checking secrets:")
-                for error in error_secrets:
-                    logger.error(error)
-                return False, auth_headers
-
-            if missing_secrets:
-                logger.error("Missing required secrets:")
-                for missing in missing_secrets:
-                    logger.error(missing)
-                logger.info("")
-                logger.warning("Please upload the missing secrets using:")
-                logger.code("dispatch secret manage --upload", "bash")
-                return False, auth_headers
-
-            logger.success(f"All {len(secret_paths)} required secrets found")
-            return True, auth_headers
-
-        except requests.exceptions.HTTPError as e:
-            if e.response.status_code == 401:
-                if attempt < max_retries - 1:
-                    # Re-authenticate and retry
-                    api_key = handle_auth_error(
-                        "Authentication failed while checking secrets"
+        for secret_status in check_result.get("secrets", []):
+            if not secret_status.get("exists", False):
+                if secret_status.get("error"):
+                    error_secrets.append(
+                        f"  • {secret_status['secret_path']}: {secret_status['error']}"
                     )
-                    auth_headers = {"Authorization": f"Bearer {api_key}"}
-                    continue
                 else:
-                    logger.error("Authentication failed after retries")
-                    return False, auth_headers
-            else:
-                logger.error(f"Failed to check secrets: {e}")
-                return False, auth_headers
-        except Exception as e:
-            logger.error(f"Failed to check secrets: {e}")
-            return False, auth_headers
+                    missing_secrets.append(f"  • {secret_status['secret_path']}")
 
-    return False, auth_headers
+        if error_secrets:
+            logger.error("Errors checking secrets:")
+            for error in error_secrets:
+                logger.error(error)
+            return False
+
+        if missing_secrets:
+            logger.error("Missing required secrets:")
+            for missing in missing_secrets:
+                logger.error(missing)
+            logger.info("")
+            logger.warning("Please upload the missing secrets using:")
+            logger.code("dispatch secret manage --upload", "bash")
+            return False
+
+        logger.success(f"All {len(secret_paths)} required secrets found")
+        return True
+
+    except requests.exceptions.HTTPError as e:
+        if e.response.status_code == 401:
+            handle_auth_error("Authentication failed while checking secrets")
+        logger.error(f"Failed to check secrets: {e}")
+        return False
+    except Exception as e:
+        logger.error(f"Failed to check secrets: {e}")
+        return False
 
 
 def check_github_integration_if_needed(
@@ -1496,14 +1443,11 @@ def check_github_integration_if_needed(
     # Check if GitHub integration is installed
     try:
         with Status("Checking GitHub integration...", spinner="dots"):
-            response = requests.get(
+            data = request_json(
+                "GET",
                 f"{DISPATCH_API_BASE}/api/unstable/integrations/github/installations",
-                headers=auth_headers,
-                timeout=30,
+                auth_headers=auth_headers,
             )
-            response.raise_for_status()
-
-            data = response.json()
             installations = data.get("installations", [])
 
             if not installations:
@@ -1528,20 +1472,18 @@ def check_github_integration_if_needed(
 
 
 def check_required_mcp_servers(
-    config: dict, auth_headers: dict[str, str], namespace: str
-) -> tuple[bool, dict[str, str]]:
+    config: dict,
+    auth_headers: dict[str, str],
+    namespace: str,
+) -> bool:
     """Check if all required MCP servers from the YAML config are installed in the namespace.
 
     The 'server' field in mcp_servers config refers to installation_name, not server_name.
-
-    Returns:
-        Tuple of (success, updated_auth_headers). The auth_headers may be updated
-        if re-authentication was required.
     """
     logger = get_logger()
     mcp_servers_config = config.get("mcp_servers", [])
     if not mcp_servers_config:
-        return True, auth_headers  # No MCP servers required
+        return True  # No MCP servers required
 
     logger.info("Checking required MCP servers...")
 
@@ -1554,7 +1496,7 @@ def check_required_mcp_servers(
             required_installations.append(server_entry)
 
     if not required_installations:
-        return True, auth_headers  # No installation names to check
+        return True  # No installation names to check
 
     # Determine MCP registry URL
     if "localhost" in DISPATCH_API_BASE or "127.0.0.1" in DISPATCH_API_BASE:
@@ -1562,74 +1504,60 @@ def check_required_mcp_servers(
     else:
         mcp_registry_url = os.getenv("MCP_REGISTRY_BASE", DISPATCH_API_BASE)
 
-    max_retries = 2
-    for attempt in range(max_retries):
-        try:
-            # List installed MCP servers in the namespace
-            with Status("Checking MCP servers...", spinner="dots"):
-                list_response = requests.get(
-                    f"{mcp_registry_url}/api/v1/mcp/namespaces/{namespace}/servers",
-                    headers=auth_headers,
-                    timeout=30,
-                )
-                list_response.raise_for_status()
-
-            result = list_response.json()
-            # Response can be either {"installations": [...]} or {"servers": [...]}
-            servers_list = result.get("installations", result.get("servers", []))
-            # Check for installation_name (new field) or fall back to server_name
-            installed_installations = {
-                inst.get("installation_name", inst.get("server_name"))
-                for inst in servers_list
-            }
-
-            missing_installations = []
-            for installation_name in required_installations:
-                if installation_name not in installed_installations:
-                    missing_installations.append(f"  • {installation_name}")
-
-            if missing_installations:
-                logger.error("Missing required MCP server installations:")
-                for missing in missing_installations:
-                    logger.error(missing)
-                logger.info("")
-                if installed_installations:
-                    logger.info("Installed MCP servers in this namespace:")
-                    for installation in sorted(installed_installations):
-                        logger.info(f"  • {installation}")
-                    logger.info("")
-                logger.warning("Please install the required MCP servers using:")
-                logger.code(
-                    f"dispatch mcp registry install <installation_name> --server <server_name> --namespace {namespace}",
-                    "bash",
-                )
-                return False, auth_headers
-
-            logger.success(
-                f"All {len(required_installations)} required MCP server installations found"
+    try:
+        # List installed MCP servers in the namespace
+        with Status("Checking MCP servers...", spinner="dots"):
+            result = request_json(
+                "GET",
+                f"{mcp_registry_url}/api/v1/mcp/namespaces/{namespace}/servers",
+                auth_headers=auth_headers,
             )
-            return True, auth_headers
+        # Response can be either {"installations": [...]} or {"servers": [...]}
+        servers_list = result.get("installations", result.get("servers", []))
+        # Check for installation_name (new field) or fall back to server_name
+        installed_installations = set()
+        for installation in servers_list:
+            installation_name = installation.get(
+                "installation_name", installation.get("server_name")
+            )
+            if installation_name:
+                installed_installations.add(installation_name)
 
-        except requests.exceptions.HTTPError as e:
-            if e.response.status_code == 401:
-                if attempt < max_retries - 1:
-                    # Re-authenticate and retry
-                    api_key = handle_auth_error(
-                        "Authentication failed while checking MCP servers"
-                    )
-                    auth_headers = {"Authorization": f"Bearer {api_key}"}
-                    continue
-                else:
-                    logger.error("Authentication failed after retries")
-                    return False, auth_headers
-            else:
-                logger.error(f"Failed to check MCP servers: {e}")
-                return False, auth_headers
-        except Exception as e:
-            logger.error(f"Failed to check MCP servers: {e}")
-            return False, auth_headers
+        missing_installations = []
+        for installation_name in required_installations:
+            if installation_name not in installed_installations:
+                missing_installations.append(f"  • {installation_name}")
 
-    return False, auth_headers
+        if missing_installations:
+            logger.error("Missing required MCP server installations:")
+            for missing in missing_installations:
+                logger.error(missing)
+            logger.info("")
+            if installed_installations:
+                logger.info("Installed MCP servers in this namespace:")
+                for installation in sorted(installed_installations):
+                    logger.info(f"  • {installation}")
+                logger.info("")
+            logger.warning("Please install the required MCP servers using:")
+            logger.code(
+                f"dispatch mcp registry install <installation_name> --server <server_name> --namespace {namespace}",
+                "bash",
+            )
+            return False
+
+        logger.success(
+            f"All {len(required_installations)} required MCP server installations found"
+        )
+        return True
+
+    except requests.exceptions.HTTPError as e:
+        if e.response.status_code == 401:
+            handle_auth_error("Authentication failed while checking MCP servers")
+        logger.error(f"Failed to check MCP servers: {e}")
+        return False
+    except Exception as e:
+        logger.error(f"Failed to check MCP servers: {e}")
+        return False
 
 
 def check_router_running(router_port: int) -> bool:
@@ -2064,9 +1992,7 @@ def deploy(
     logger.info(f"Agent name: {agent_name}")
     logger.info(f"Package size: {file_size / (1024 * 1024):.2f} MB")
 
-    # Get API key for authentication
-    api_key = get_api_key()
-    auth_headers = {"Authorization": f"Bearer {api_key}"}
+    auth_headers = get_auth_headers()
 
     # Run validation checks
     logger.info("Running pre-deployment validation...")
@@ -2078,49 +2004,34 @@ def deploy(
             logger.info("Use --force flag to skip validation checks.")
             raise e
 
-        # Refresh auth headers in case validation prompted for a new key
-        api_key = get_api_key()
-        auth_headers = {"Authorization": f"Bearer {api_key}"}
-
     # Step 1: request upload URL
     # Always use multipart upload for reliability (works with any size)
     MULTIPART_THRESHOLD = 0  # 0 means always use multipart
     use_multipart = file_size > MULTIPART_THRESHOLD
 
-    max_retries = 2
-    for attempt in range(max_retries):
-        try:
-            with Status("Requesting upload URL...", spinner="dots"):
-                presign_resp = requests.post(
-                    build_namespaced_url("/agents/get_upload_url", namespace),
-                    data={
-                        "agent_name": agent_name,
-                        "namespace": namespace,
-                        "content_type": content_type,
-                        "multipart": str(use_multipart).lower(),
-                        "file_size": str(file_size),
-                    },
-                    headers=auth_headers,
-                    timeout=60,
-                )
-                presign_resp.raise_for_status()
-                break
-        except requests.exceptions.HTTPError as e:
-            if e.response.status_code == 401:  # Unauthorized
-                if attempt < max_retries - 1:
-                    # Handle auth error and retry with new key
-                    api_key = handle_auth_error("Invalid or expired API key")
-                    auth_headers = {"Authorization": f"Bearer {api_key}"}
-                    continue
-                else:
-                    logger.error("Authentication failed after retries")
-                    raise typer.Exit(1)
-            else:
-                logger.error(f"Failed to get upload URL: {e}")
-                raise typer.Exit(1)
-        except Exception as e:
-            logger.error(f"Failed to get upload URL: {e}")
-            raise typer.Exit(1)
+    try:
+        with Status("Requesting upload URL...", spinner="dots"):
+            presign_resp = requests.post(
+                build_namespaced_url("/agents/get_upload_url", namespace),
+                data={
+                    "agent_name": agent_name,
+                    "namespace": namespace,
+                    "content_type": content_type,
+                    "multipart": str(use_multipart).lower(),
+                    "file_size": str(file_size),
+                },
+                headers=auth_headers,
+                timeout=60,
+            )
+            presign_resp.raise_for_status()
+    except requests.exceptions.HTTPError as e:
+        if e.response.status_code == 401:  # Unauthorized
+            handle_auth_error("Invalid or expired API key")
+        logger.error(f"Failed to get upload URL: {e}")
+        raise typer.Exit(1)
+    except Exception as e:
+        logger.error(f"Failed to get upload URL: {e}")
+        raise typer.Exit(1)
 
     payload = presign_resp.json()
 
@@ -2172,44 +2083,32 @@ def deploy(
     logger.success("Upload complete")
     # Step 3: Push the image via codebuild
     # Note: secrets and other config are now read from dispatch.yaml in the uploaded source package
-    for attempt in range(max_retries):
-        try:
-            with Status(
-                "Building and checking in image to production...", spinner="dots"
-            ):
-                push_resp = requests.post(
-                    build_namespaced_url("/agents/push_image_via_codebuild", namespace),
-                    data={
-                        "agent_name": agent_name,
-                        "namespace": namespace,
-                    },
-                    headers=auth_headers,
-                    timeout=600,
-                )
-                push_resp.raise_for_status()
-                break
-        except requests.exceptions.HTTPError as e:
-            if e.response.status_code == 401:  # Unauthorized
-                if attempt < max_retries - 1:
-                    # Handle auth error and retry with new key
-                    api_key = handle_auth_error("Invalid or expired API key")
-                    auth_headers = {"Authorization": f"Bearer {api_key}"}
-                    continue
-                else:
-                    logger.error("Authentication failed after retries")
-                    raise typer.Exit(1)
-            elif e.response.status_code == 409:
-                logger.error(
-                    f"A deployment is already in progress for agent '{agent_name}'. "
-                    "Wait for it to finish or cancel it before deploying again."
-                )
-                raise typer.Exit(1)
-            else:
-                logger.error(f"Failed to push image to production: {e}")
-                raise typer.Exit(1)
-        except Exception as e:
-            logger.error(f"Failed to push image to production: {e}")
+    try:
+        with Status("Building and checking in image to production...", spinner="dots"):
+            push_resp = requests.post(
+                build_namespaced_url("/agents/push_image_via_codebuild", namespace),
+                data={
+                    "agent_name": agent_name,
+                    "namespace": namespace,
+                },
+                headers=auth_headers,
+                timeout=600,
+            )
+            push_resp.raise_for_status()
+    except requests.exceptions.HTTPError as e:
+        if e.response.status_code == 401:  # Unauthorized
+            handle_auth_error("Invalid or expired API key")
+        if e.response.status_code == 409:
+            logger.error(
+                f"A deployment is already in progress for agent '{agent_name}'. "
+                "Wait for it to finish or cancel it before deploying again."
+            )
             raise typer.Exit(1)
+        logger.error(f"Failed to push image to production: {e}")
+        raise typer.Exit(1)
+    except Exception as e:
+        logger.error(f"Failed to push image to production: {e}")
+        raise typer.Exit(1)
 
     logger.success("Agent image built and checked in")
     job_id = push_resp.json().get("job_id")
@@ -2264,10 +2163,7 @@ def deploy(
                 seen_logs = len(logs)
             except requests.exceptions.HTTPError as e:
                 if e.response.status_code == 401:  # Unauthorized
-                    # Handle auth error and update headers for next iteration
-                    api_key = handle_auth_error("Invalid or expired API key")
-                    auth_headers = {"Authorization": f"Bearer {api_key}"}
-                    job_status = None
+                    handle_auth_error("Invalid or expired API key")
                 else:
                     logger.warning(f"Polling error: {e}")
                     job_status = None
@@ -2395,96 +2291,6 @@ def extract_handler_schemas_from_agent(agent_path: str) -> dict:
         return {}
 
 
-def check_schema_compatibility(
-    agent_schemas: dict, namespace: str, auth_headers: dict, agent_name: str
-) -> bool:
-    """Check if agent schemas are compatible with existing topic schemas.
-
-    Returns True if compatible or user confirms to proceed.
-    Returns False if incompatible and user chooses not to proceed.
-    """
-
-    compatibility_issues = []
-
-    for handler_name, handler_info in agent_schemas.items():
-        # Get topics from handler_info, fallback to handler_name for legacy support
-        topics = handler_info.get("topics", [handler_name])
-        if not topics:
-            topics = [handler_name]
-
-        for topic in topics:
-            try:
-                # Fetch existing topic schema from backend
-                response = requests.get(
-                    build_namespaced_url(f"/events/schemas/{topic}", namespace),
-                    headers=auth_headers,
-                    timeout=30,
-                )
-
-                if response.status_code == 404:
-                    # New topic - no compatibility issues
-                    continue
-                elif response.status_code == 200:
-                    topic_data = response.json()
-
-                    # Look for incompatible handlers
-                    incompatible_handlers = [
-                        h
-                        for h in topic_data.get("handlers", [])
-                        if not h.get("compatible", True)
-                    ]
-
-                    if incompatible_handlers:
-                        # Get detailed incompatibility information for deployment warnings too
-                        handler_details = []
-                        for ih in incompatible_handlers:
-                            ih_agent_name = ih.get("agent_name", "unknown")
-                            ih_handler_name = ih.get("handler_name", "unknown")
-                            differences = ih.get("differences", [])
-                            handler_details.append(
-                                f"{ih_agent_name}:{ih_handler_name} ({len(differences)} differences)"
-                            )
-
-                        compatibility_issues.append(
-                            {
-                                "topic": topic,
-                                "handler": handler_name,
-                                "issue": "Topic has existing incompatible handlers",
-                                "details": f"{len(incompatible_handlers)} incompatible handler(s)",
-                                "incompatible_handlers": handler_details,
-                            }
-                        )
-
-            except requests.RequestException:
-                # If we can't check, assume it's okay
-                continue
-
-    if not compatibility_issues:
-        return True
-
-    logger = get_logger()
-    # Show compatibility warnings
-    logger.warning("")
-    logger.warning("Schema Compatibility Warnings:")
-    for issue in compatibility_issues:
-        topic_url = f"{DISPATCH_API_BASE}/namespaces/{namespace}/topic/{issue['topic']}"
-        logger.warning(f"  • Topic '{issue['topic']}': {issue['issue']}")
-        logger.info(f"    Handler: {issue['handler']}")
-        logger.info(f"    Details: {issue['details']}")
-        logger.info(f"    View topic schema: {topic_url}")
-
-        # Show incompatible handlers if available
-        if "incompatible_handlers" in issue:
-            logger.info(
-                f"    Incompatible handlers: {', '.join(issue['incompatible_handlers'])}"
-            )
-
-    logger.info("")
-    return typer.confirm(
-        "Deploy anyway? This might cause compatibility issues.", default=False
-    )
-
-
 @agent_app.command("validate")
 def validate(
     namespace: Annotated[
@@ -2526,34 +2332,28 @@ def validate(
     logger.info(f"Agent name: {agent_name}")
     logger.info(f"Namespace: {namespace}")
 
-    # Get API key for authentication
-    api_key = get_api_key()
-    auth_headers = {"Authorization": f"Bearer {api_key}"}
+    auth_headers = get_auth_headers()
 
     validation_passed = True
 
     # 1. Validate that the namespace exists
     logger.info("")
     logger.info("1. Validating namespace...")
-    ns_valid, auth_headers = validate_namespace(namespace, auth_headers)
+    ns_valid = validate_namespace(namespace, auth_headers)
     if not ns_valid:
         validation_passed = False
 
     # 2. Check required secrets
     logger.info("")
     logger.info("2. Checking required secrets...")
-    secrets_valid, auth_headers = check_required_secrets(
-        config, auth_headers, namespace
-    )
+    secrets_valid = check_required_secrets(config, auth_headers, namespace)
     if not secrets_valid:
         validation_passed = False
 
     # 3. Check required MCP servers
     logger.info("")
     logger.info("3. Checking required MCP servers...")
-    mcp_valid, auth_headers = check_required_mcp_servers(
-        config, auth_headers, namespace
-    )
+    mcp_valid = check_required_mcp_servers(config, auth_headers, namespace)
     if not mcp_valid:
         validation_passed = False
 

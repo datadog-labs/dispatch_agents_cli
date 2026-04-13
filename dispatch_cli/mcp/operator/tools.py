@@ -20,7 +20,7 @@ from dispatch_cli.utils import (
 from mcp.server.fastmcp import Context, FastMCP
 from mcp.server.session import ServerSession
 
-from ..client import DispatchAPIClient
+from ..client import OperatorBackendClient
 from ..config import MCPConfig
 from ..models import (
     CreateScheduleRequest,
@@ -541,36 +541,6 @@ class ListLongTermMemoriesRequest(BaseModel):
     )
 
 
-# Helper functions for testable core logic
-
-
-def cleanup_agent_process_by_pid_file(pid_file_path: str) -> bool:
-    """Clean up a single agent process using its PID file.
-
-    Args:
-        pid_file_path: Path to the PID file
-
-    Returns:
-        True if a process was killed, False otherwise
-    """
-    try:
-        with open(pid_file_path) as f:
-            pid = int(f.read().strip())
-
-        # Try to kill the process group (kills parent + all children)
-        try:
-            os.killpg(os.getpgid(pid), signal.SIGTERM)
-            os.remove(pid_file_path)
-            return True
-        except ProcessLookupError:
-            # Process already stopped, just clean up PID file
-            os.remove(pid_file_path)
-            return False
-    except (OSError, ValueError):
-        # Invalid PID file or IO error - skip it
-        return False
-
-
 def write_pid_file(agent_directory: str, pid: int) -> str:
     """Write a PID file for an agent process.
 
@@ -890,7 +860,7 @@ Always specify a timezone for schedules. Common timezones:
 """
 
 
-def create_operator_mcp(client: DispatchAPIClient, config: MCPConfig) -> FastMCP:
+def create_operator_mcp(client: OperatorBackendClient, config: MCPConfig) -> FastMCP:
     """Create operator MCP server with tools."""
     mcp = FastMCP("dispatch-operator", instructions=OPERATOR_INSTRUCTIONS)
 
@@ -2213,12 +2183,7 @@ Please walk me through each step, waiting for confirmation before proceeding to 
         context. Your identity is determined automatically from your
         credentials.
         """
-        async_client = await client._get_async_client()
-        response = await async_client.post(
-            client._global_url("/feedback/"),
-            json=request.model_dump(),
-        )
-        response.raise_for_status()
+        await client.submit_feedback(request.model_dump())
         return SubmitFeedbackResponse()
 
     # ── MCP Prompts (loaded from markdown files) ──────────────────────

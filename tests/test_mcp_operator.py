@@ -8,12 +8,135 @@ from unittest.mock import call, patch
 
 import pytest
 
+from dispatch_cli.auth_provider import ResolvedCredential, StaticCredentialProvider
+from dispatch_cli.mcp.client import OperatorBackendClient
 from dispatch_cli.mcp.operator.tools import (
-    cleanup_agent_process_by_pid_file,
     cleanup_all_agent_processes,
     read_agent_log_file,
     write_pid_file,
 )
+
+
+def _cleanup_agent_process_by_pid_file(pid_file_path: str) -> bool:
+    try:
+        with open(pid_file_path) as f:
+            pid = int(f.read().strip())
+
+        try:
+            os.killpg(os.getpgid(pid), signal.SIGTERM)
+            os.remove(pid_file_path)
+            return True
+        except ProcessLookupError:
+            os.remove(pid_file_path)
+            return False
+    except (OSError, ValueError):
+        return False
+
+
+class FakeOperatorBackendClient:
+    def close(self) -> None:
+        raise AssertionError("Not expected in prompt tests")
+
+    def list_namespaces(self) -> dict:
+        raise AssertionError("Not expected in prompt tests")
+
+    def list_agents(self, namespace: str | None = None, limit: int = 50) -> list[dict]:
+        raise AssertionError("Not expected in prompt tests")
+
+    def get_agent_info(self, agent_id: str, namespace: str | None = None) -> dict:
+        raise AssertionError("Not expected in prompt tests")
+
+    def delete_agent(self, agent_id: str, namespace: str | None = None) -> dict:
+        raise AssertionError("Not expected in prompt tests")
+
+    def stop_agent(self, agent_name: str, namespace: str | None = None):
+        raise AssertionError("Not expected in prompt tests")
+
+    def reboot_agent(self, agent_name: str, namespace: str | None = None):
+        raise AssertionError("Not expected in prompt tests")
+
+    def get_agent_logs(
+        self,
+        agent_name: str,
+        version: str = "latest",
+        namespace: str | None = None,
+        limit: int = 100,
+        **kwargs,
+    ) -> dict:
+        raise AssertionError("Not expected in prompt tests")
+
+    def publish_event(
+        self,
+        topic: str,
+        payload: dict,
+        namespace: str | None = None,
+        sender_id: str = "mcp-cli",
+        **kwargs,
+    ) -> dict:
+        raise AssertionError("Not expected in prompt tests")
+
+    def get_topic_schema(self, topic: str, namespace: str | None = None) -> dict:
+        raise AssertionError("Not expected in prompt tests")
+
+    def list_topics(self, namespace: str):
+        raise AssertionError("Not expected in prompt tests")
+
+    def get_recent_events(
+        self, namespace: str, topic: str | None = None, limit: int = 20
+    ):
+        raise AssertionError("Not expected in prompt tests")
+
+    def get_event_trace(self, trace_id: str, namespace: str):
+        raise AssertionError("Not expected in prompt tests")
+
+    def get_recent_traces(
+        self, namespace: str, topic: str | None = None, limit: int = 50
+    ):
+        raise AssertionError("Not expected in prompt tests")
+
+    async def invoke_function_async(
+        self,
+        agent_name: str,
+        function_name: str,
+        payload: dict,
+        namespace: str | None = None,
+        timeout_seconds: int | None = None,
+    ) -> dict:
+        raise AssertionError("Not expected in prompt tests")
+
+    def get_invocation_status(self, invocation_id: str, namespace: str | None = None):
+        raise AssertionError("Not expected in prompt tests")
+
+    async def get_invocation_status_async(
+        self, invocation_id: str, namespace: str | None = None
+    ) -> dict:
+        raise AssertionError("Not expected in prompt tests")
+
+    async def get_deploy_status_async(
+        self, job_id: str, namespace: str | None = None
+    ) -> dict:
+        raise AssertionError("Not expected in prompt tests")
+
+    def list_long_term_memories(self, agent_name: str, namespace: str):
+        raise AssertionError("Not expected in prompt tests")
+
+    async def create_schedule(self, request):
+        raise AssertionError("Not expected in prompt tests")
+
+    async def list_schedules(self, request):
+        raise AssertionError("Not expected in prompt tests")
+
+    async def get_schedule(self, request):
+        raise AssertionError("Not expected in prompt tests")
+
+    async def update_schedule(self, request):
+        raise AssertionError("Not expected in prompt tests")
+
+    async def delete_schedule(self, request):
+        raise AssertionError("Not expected in prompt tests")
+
+    async def submit_feedback(self, payload: dict) -> None:
+        raise AssertionError("Not expected in prompt tests")
 
 
 @pytest.mark.unit
@@ -29,13 +152,16 @@ class TestMCPPrompts:
     @pytest.fixture()
     def mcp_server(self):
         """Create an MCP server instance with a mock API client."""
-        from unittest.mock import MagicMock
-
         from dispatch_cli.mcp.config import MCPConfig
         from dispatch_cli.mcp.operator.tools import create_operator_mcp
 
-        config = MCPConfig(api_key="test-key", namespace="test-ns")
-        client = MagicMock()
+        config = MCPConfig(
+            credential_provider=StaticCredentialProvider(
+                ResolvedCredential(auth_mode="api_key", access_token="test-key")
+            ),
+            namespace="test-ns",
+        )
+        client: OperatorBackendClient = FakeOperatorBackendClient()
         return create_operator_mcp(client, config)
 
     @pytest.mark.asyncio
@@ -207,7 +333,7 @@ class TestPIDFileLifecycle:
                 patch("os.killpg") as mock_killpg,
                 patch("os.getpgid", return_value=11111),
             ):
-                result = cleanup_agent_process_by_pid_file(pid_file_path)
+                result = _cleanup_agent_process_by_pid_file(pid_file_path)
 
                 # Verify process group was killed
                 assert result is True
@@ -231,7 +357,7 @@ class TestPIDFileLifecycle:
                 patch("os.killpg", side_effect=ProcessLookupError),
                 patch("os.getpgid", return_value=99999),
             ):
-                result = cleanup_agent_process_by_pid_file(pid_file_path)
+                result = _cleanup_agent_process_by_pid_file(pid_file_path)
 
                 # Should return False (process wasn't killed because it was already dead)
                 assert result is False

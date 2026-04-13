@@ -105,6 +105,11 @@ def check_and_notify_cli_update(backend_url: str):
     Args:
         backend_url: Base URL of the backend API
     """
+    import sys
+
+    if not sys.stdout.isatty():
+        return
+
     if not _should_check_version():
         return
 
@@ -133,8 +138,6 @@ def check_and_notify_cli_update(backend_url: str):
             upgrade_command = "uv tool install git+ssh://git@github.com/datadog-labs/dispatch_agents_cli.git --upgrade"
 
             # Use raw print to avoid wrapping (logger not initialized yet in callback)
-            import sys
-
             print(file=sys.stdout)
             print(
                 f"\033[33mNew CLI Version Available: v{latest_version}\033[0m (current: v{current_version})",

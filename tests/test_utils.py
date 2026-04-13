@@ -115,6 +115,23 @@ class TestPublicRepoUrls:
         assert "@v" not in message
         assert "#subdirectory=" not in message
 
+    def test_cli_update_check_is_silent_when_stdout_is_not_a_tty(self, capsys):
+        """Machine-readable invocations should not emit update notices on stdout."""
+        from dispatch_cli.version_check import check_and_notify_cli_update
+
+        with (
+            patch("sys.stdout.isatty", return_value=False),
+            patch("dispatch_cli.version_check._should_check_version") as should_check,
+            patch("dispatch_cli.version_check.get_sdk_version_requirements") as get_req,
+            patch("dispatch_cli.version_check._get_version", return_value="0.1.0"),
+        ):
+            check_and_notify_cli_update("https://dispatchagents.work")
+
+        should_check.assert_not_called()
+        get_req.assert_not_called()
+        captured = capsys.readouterr()
+        assert captured.out == ""
+
 
 class TestDetectProjectConfig:
     def test_reads_tool_dispatch_config(self):
