@@ -172,3 +172,37 @@ system_packages = []
             with open(os.path.join(tmpdir, DISPATCH_YAML)) as fh:
                 config = yaml.safe_load(fh)
             assert config["entrypoint"] == "my_agent.py"
+
+    def test_init_does_not_prompt_for_sdk_upgrade_after_scaffolding(self):
+        """Init should not run the SDK suggestion check after creating the project."""
+        runner = CliRunner()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+
+            def mock_subprocess_run(args, **kwargs):
+                if args[0] == "uv" and args[1] == "init":
+                    pyproject_path = os.path.join(
+                        kwargs.get("cwd", tmpdir), "pyproject.toml"
+                    )
+                    with open(pyproject_path, "w") as f:
+                        f.write(
+                            '[project]\nname = "test"\nrequires-python = ">=3.13"\n'
+                        )
+                mock_result = MagicMock()
+                mock_result.returncode = 0
+                mock_result.stdout = ""
+                mock_result.stderr = ""
+                return mock_result
+
+            with patch("typer.prompt", return_value="agent.py"):
+                with patch("typer.confirm", return_value=True):
+                    with patch("subprocess.run", side_effect=mock_subprocess_run):
+                        with patch(
+                            "dispatch_cli.commands.agent._check_and_suggest_sdk_update"
+                        ) as suggest_sdk_update:
+                            result = runner.invoke(
+                                app, ["agent", "init", "--path", tmpdir]
+                            )
+
+            assert result.exit_code == 0
+            suggest_sdk_update.assert_not_called()

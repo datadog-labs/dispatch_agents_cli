@@ -14,42 +14,29 @@ from dispatch_cli.utils import (
     validate_dispatch_project,
 )
 
-PUBLIC_SDK_REPO = "datadog-labs/dispatch_agents_sdk"
-PUBLIC_CLI_REPO = "datadog-labs/dispatch_agents_cli"
+SDK_PACKAGE = "dispatch-agents"
 
 
-class TestPublicRepoUrls:
-    """Ensure all customer-facing URLs point to the public repos."""
+class TestSdkInstallGuidance:
+    """Ensure customer-facing SDK guidance uses the packaged install path."""
 
-    def test_sdk_dependency_constant_points_to_public_repo(self):
-        """SDK_DEPENDENCY must reference the public SDK repo."""
-        assert PUBLIC_SDK_REPO in SDK_DEPENDENCY
-        assert "DataDog/dispatch_agents" not in SDK_DEPENDENCY
+    def test_sdk_dependency_constant_points_to_package(self):
+        """SDK_DEPENDENCY should default to the published SDK package."""
+        assert SDK_DEPENDENCY == SDK_PACKAGE
 
-    def test_get_sdk_dependency_with_version_points_to_public_repo(self):
-        """get_sdk_dependency() should return a URL to the public SDK repo with --upgrade."""
+    def test_get_sdk_dependency_with_version_points_to_package(self):
+        """get_sdk_dependency() should resolve to the packaged SDK name."""
         with patch.dict(os.environ, {}, clear=False):
             os.environ.pop("SDK_DEPENDENCY", None)
-            with patch(
-                "dispatch_cli.version_check.get_cli_suggested_sdk_version",
-                return_value="1.2.3",
-            ):
-                result = get_sdk_dependency()
-        assert PUBLIC_SDK_REPO in result
-        assert "@v1.2.3" not in result
-        assert "#subdirectory=" not in result
+            result = get_sdk_dependency()
+        assert result == SDK_PACKAGE
 
-    def test_get_sdk_dependency_fallback_points_to_public_repo(self):
-        """Fallback SDK dependency (no version detected) must use public repo."""
+    def test_get_sdk_dependency_fallback_points_to_package(self):
+        """Fallback SDK dependency (no version detected) should use the package."""
         with patch.dict(os.environ, {}, clear=False):
             os.environ.pop("SDK_DEPENDENCY", None)
-            with patch(
-                "dispatch_cli.version_check.get_cli_suggested_sdk_version",
-                return_value=None,
-            ):
-                result = get_sdk_dependency()
-        assert PUBLIC_SDK_REPO in result
-        assert "#subdirectory=" not in result
+            result = get_sdk_dependency()
+        assert result == SDK_PACKAGE
 
     def test_validate_sdk_version_above_minimum_is_valid(self):
         """SDK above minimum but below current should be 'valid', not 'outdated'."""
@@ -68,8 +55,8 @@ class TestPublicRepoUrls:
         assert status == "valid"
         assert message is None
 
-    def test_version_check_sdk_blocked_url(self):
-        """Blocked SDK upgrade message must reference the public SDK repo without version pin."""
+    def test_version_check_sdk_blocked_command(self):
+        """Blocked SDK upgrade message should use the packaged upgrade command."""
         from dispatch_cli.version_check import validate_sdk_version
 
         with patch(
@@ -83,12 +70,10 @@ class TestPublicRepoUrls:
         ):
             status, message = validate_sdk_version("0.0.1", "http://fake")
         assert status == "blocked"
-        assert PUBLIC_SDK_REPO in message
-        assert "@v" not in message
-        assert "#subdirectory=" not in message
+        assert "uv add dispatch-agents --upgrade" in message
 
-    def test_version_check_sdk_not_installed_url(self):
-        """SDK not-installed message must reference the public SDK repo with --upgrade."""
+    def test_version_check_sdk_not_installed_command(self):
+        """SDK not-installed message should use the packaged install command."""
         from dispatch_cli.version_check import check_sdk_version_suggestion
 
         with patch(
@@ -97,12 +82,11 @@ class TestPublicRepoUrls:
         ):
             status, message = check_sdk_version_suggestion(None)
         assert status == "not_installed"
-        assert PUBLIC_SDK_REPO in message
-        assert "@v" not in message
-        assert "#subdirectory=" not in message
+        assert "uv add dispatch-agents" in message
+        assert "--upgrade" not in message
 
-    def test_version_check_sdk_outdated_url(self):
-        """SDK outdated message must reference the public SDK repo with --upgrade."""
+    def test_version_check_sdk_outdated_command(self):
+        """SDK outdated message should use the packaged upgrade command."""
         from dispatch_cli.version_check import check_sdk_version_suggestion
 
         with patch(
@@ -111,9 +95,7 @@ class TestPublicRepoUrls:
         ):
             status, message = check_sdk_version_suggestion("1.0.0")
         assert status == "outdated"
-        assert PUBLIC_SDK_REPO in message
-        assert "@v" not in message
-        assert "#subdirectory=" not in message
+        assert "uv add dispatch-agents --upgrade" in message
 
     def test_cli_update_check_is_silent_when_stdout_is_not_a_tty(self, capsys):
         """Machine-readable invocations should not emit update notices on stdout."""

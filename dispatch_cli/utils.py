@@ -58,18 +58,15 @@ DISPATCH_REQUIREMENTS = [
     "asyncio",
 ]
 # Legacy constant for backwards compatibility - prefer get_sdk_dependency() function
-SDK_DEPENDENCY = os.getenv(
-    "SDK_DEPENDENCY",
-    "git+ssh://git@github.com/datadog-labs/dispatch_agents_sdk.git",
-)
+SDK_DEPENDENCY = os.getenv("SDK_DEPENDENCY", "dispatch-agents")
 
 
 def get_sdk_dependency() -> str:
-    """Get the SDK dependency string using the CLI's bundled SDK version.
+    """Get the SDK dependency string for agent projects.
 
-    Returns a git+ssh URL pointing to the specific SDK version tag that
-    matches the SDK version bundled with this CLI. Falls back to the default
-    SDK_DEPENDENCY if version detection fails.
+    Defaults to the published PyPI package so `dispatch agent init` does not
+    send users through a GitHub install flow. An explicit `SDK_DEPENDENCY`
+    environment override still wins for local development and testing.
 
     Returns:
         SDK dependency string for use with 'uv add'
@@ -78,17 +75,6 @@ def get_sdk_dependency() -> str:
     if os.getenv("SDK_DEPENDENCY"):
         return os.getenv("SDK_DEPENDENCY", SDK_DEPENDENCY)
 
-    # Try to get the CLI's bundled SDK version
-    try:
-        from dispatch_cli.version_check import get_cli_suggested_sdk_version
-
-        version = get_cli_suggested_sdk_version()
-        if version:
-            return "git+ssh://git@github.com/datadog-labs/dispatch_agents_sdk.git"
-    except ImportError:
-        pass
-
-    # Fall back to branch-based dependency
     return SDK_DEPENDENCY
 
 
