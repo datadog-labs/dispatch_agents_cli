@@ -768,9 +768,6 @@ async def hello_world(payload: HelloWorldRequest) -> HelloWorldResponse:
         with open(claude_md_path, "w") as f:
             f.write("Read @./AGENTS.md\n")
 
-    # Check if agent's SDK version matches CLI's suggested version (warn only for init)
-    _check_and_suggest_sdk_update(path, warn_only=True)
-
     logger.success("Agent Created!")
     logger.info(f"You successfully created {agent_name}.")
     logger.info(f"Take a look in {entrypoint_file} to see the agent code.")
