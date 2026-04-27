@@ -1162,7 +1162,6 @@ def dev(
 
 
 def generate_schemas_for_dev(abs_path: str, agent_name: str) -> None:
-
     # Create a dispatch directory for schemas
     dispatch_dir = os.path.join(abs_path, DISPATCH_DIR)
     os.makedirs(dispatch_dir, exist_ok=True)

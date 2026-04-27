@@ -1031,7 +1031,7 @@ namespace: {ns}
         # Parse DEPLOY_JOB_ID from CLI output
         job_id: str | None = None
         deploy_namespace: str | None = None
-        for line in stdout_lines:
+        for line in stdout_lines + stderr_lines:
             if line.startswith("DEPLOY_JOB_ID="):
                 job_id = line.split("=", 1)[1]
             elif line.startswith("DEPLOY_NAMESPACE="):

@@ -108,6 +108,7 @@ DEFAULT_CONFIG: dict[str, object | None] = {
     "local_dependencies": None,
     "agent_name": None,
     "env": None,  # plain env vars (like {"LOG_LEVEL": "debug"})
+    "vars": None,  # config variables accessible via dispatch_agents.config.vars (not injected as env vars)
     "secrets": None,  # list of objects with name/secret_id for secrets manager paths (like [{"name": "OPENAI_API_KEY", "secret_id": "/shared/openai-api-key"}])
     "volumes": None,  # list of volume objects (like [{"name": "data", "mountPath": "/data", "mode": "read_write_many"}])
     "mcp_servers": None,  # list of MCP server configs (e.g., [{"server": "com.datadoghq.mcp"}])

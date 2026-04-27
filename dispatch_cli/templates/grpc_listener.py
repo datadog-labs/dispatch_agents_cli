@@ -100,6 +100,10 @@ def load_config():
 config = load_config()
 entrypoint_file = config.get("entrypoint", "agent.py")
 
+# Point the SDK runtime config at the same dispatch.yaml we loaded
+yaml_path = os.path.join(root_path, "dispatch.yaml")
+os.environ.setdefault("DISPATCH_CONFIG_PATH", yaml_path)
+
 # Backend configuration and agent identity
 backend_base_url = os.getenv("BACKEND_URL", "http://dispatch.api:8000")
 backend_url = f"{backend_base_url}/api/unstable"
