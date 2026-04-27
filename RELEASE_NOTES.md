@@ -1,2 +1,2 @@
-## Bug Fixes
-- Improved SDK setup guidance provided by `dispatch init`, ensuring users receive accurate instructions for integrating the packaged SDK.
+## Features
+- Added a Company Researcher component, enabling users to research and retrieve company information directly from the CLI interface.
