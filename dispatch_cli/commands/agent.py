@@ -1872,7 +1872,26 @@ def deploy(
         bool,
         typer.Option(
             "--force",
-            help="Skip schema compatibility warnings and deploy anyway",
+            help=(
+                "Skip CLI-side checks (unconfigured-secret block, schema "
+                "compatibility validation) and deploy anyway. Does NOT "
+                "drop egress selectors that violate the org allow list — "
+                "use --allow-egress-drop for that."
+            ),
+        ),
+    ] = False,
+    allow_egress_drop: Annotated[
+        bool,
+        typer.Option(
+            "--allow-egress-drop",
+            help=(
+                "Permit the server to drop egress selectors not covered "
+                "by the organization egress allow list (spec §11.2 req "
+                "74) and deploy with the in-policy remainder. Without "
+                "this flag, deploys hard-fail with "
+                "ORG_EGRESS_ALLOW_LIST_VIOLATION when the agent's "
+                "allow_domains aren't a strict subset of the org list."
+            ),
         ),
     ] = False,
     no_wait: Annotated[
@@ -2078,7 +2097,10 @@ def deploy(
 
     logger.success("Upload complete")
     # Step 3: Push the image via codebuild
-    # Note: secrets and other config are now read from dispatch.yaml in the uploaded source package
+    # Note: secrets and other config are now read from dispatch.yaml in the uploaded source package.
+    # The server-side `force` flag is now controlled exclusively by
+    # --allow-egress-drop (spec §11.2 req 74). The CLI's --force only
+    # bypasses local checks and is NOT propagated to the server.
     try:
         with Status("Building and checking in image to production...", spinner="dots"):
             push_resp = requests.post(
@@ -2086,6 +2108,7 @@ def deploy(
                 data={
                     "agent_name": agent_name,
                     "namespace": namespace,
+                    "force": "true" if allow_egress_drop else "false",
                 },
                 headers=auth_headers,
                 timeout=600,
@@ -2168,11 +2191,28 @@ def deploy(
                 job_status = None
 
             if job_status == "completed":
+                # On a successful deploy, egress_policy_violations contains
+                # entries dropped under --force — surface each as a warning.
+                for sel in data.get("egress_policy_violations", []) or []:
+                    rendered = sel.get("match_name") or sel.get("match_pattern") or ""
+                    logger.warning(f"egress domain '{rendered}' dropped by org policy")
                 logger.success(f"Agent deployed to remote server: {agent_name}")
                 logger.info(f"You can see its status on {DISPATCH_API_BASE}")
                 break
             elif job_status == "failed":
                 error = data.get("error", "Unknown error")
+                error_code = data.get("error_code")
+                if error_code == "ORG_EGRESS_ALLOW_LIST_VIOLATION":
+                    # On a failed deploy with this code, egress_policy_violations
+                    # contains the entries that caused the failure — enumerate
+                    # them so the user knows which to remove or get widened.
+                    for sel in data.get("egress_policy_violations", []) or []:
+                        rendered = (
+                            sel.get("match_name") or sel.get("match_pattern") or ""
+                        )
+                        logger.error(f"egress domain '{rendered}' violates org policy")
+                    logger.error(error)
+                    raise typer.Exit(2)
                 logger.error(f"Deployment failed: {error}")
                 raise typer.Exit(1)
             elif job_status == "cancelled":
