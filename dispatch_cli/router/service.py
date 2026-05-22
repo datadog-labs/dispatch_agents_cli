@@ -18,7 +18,7 @@ from agentservice.v1 import (
     service_pb2_grpc,
 )
 from dispatch_agents import LLMToolCall
-from dispatch_agents.models import (
+from dispatch_agents._models import (
     EventRequest,
     FunctionMessage,
     InvokeFunctionRequest,
@@ -307,7 +307,7 @@ class InvocationStatus:
     ERROR = "error"
 
 
-# InvokeFunctionRequest is imported from dispatch_agents.models (SDK)
+# InvokeFunctionRequest is imported from dispatch_agents._models (SDK)
 # to ensure API consistency between SDK, backend, and local router
 
 
@@ -648,40 +648,6 @@ async def subscribe(body: SubscriptionBody, request: Request):
         topics=topics,
         agent_name=body.agent_name,
         subscribers=added_counts,
-    )
-
-
-@api_router.post("/events/unsubscribe", response_model=SubscriptionResponse)
-async def unsubscribe(body: SubscriptionBody):
-    """Backend-compatible unsubscribe endpoint."""
-    if not body.topics or not body.agent_name:
-        raise HTTPException(
-            status_code=400, detail="Both topics and agent_name are required"
-        )
-
-    topics = [t for t in set(body.topics) if isinstance(t, str) and t.strip()]
-    remaining_counts: dict[str, int] = {}
-
-    async with _subscriptions_lock:
-        for topic in topics:
-            if (
-                topic in _subscriptions_by_topic
-                and body.agent_name in _subscriptions_by_topic[topic]
-            ):
-                _subscriptions_by_topic[topic].discard(body.agent_name)
-                if not _subscriptions_by_topic[topic]:
-                    _subscriptions_by_topic.pop(topic)
-                    remaining_counts[topic] = 0
-                else:
-                    remaining_counts[topic] = len(_subscriptions_by_topic[topic])
-            else:
-                remaining_counts[topic] = len(_subscriptions_by_topic.get(topic, set()))
-
-    return SubscriptionResponse(
-        message="Unsubscribed",
-        topics=topics,
-        agent_name=body.agent_name,
-        subscribers=remaining_counts,
     )
 
 

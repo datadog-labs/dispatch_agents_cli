@@ -14,7 +14,7 @@ from typing import Annotated
 
 import requests
 import typer
-from dispatch_agents.models import TopicMessage
+from dispatch_agents._models import TopicMessage
 
 from dispatch_cli.logger import get_logger
 from dispatch_cli.utils import LOCAL_ROUTER_PORT, LOCAL_ROUTER_URL

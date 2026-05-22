@@ -20,7 +20,7 @@ from typing import IO, Annotated, cast
 import pathspec
 import requests
 import typer
-from dispatch_agents.models import AgentContainerStatus
+from dispatch_agents._models import AgentContainerStatus
 from rich.console import Console
 from rich.progress import (
     BarColumn,

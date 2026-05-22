@@ -5,11 +5,10 @@ import os
 import signal
 import subprocess
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal, TypeAlias
 
 import aiohttp
 import httpx
-from dispatch_agents import FeedbackSentiment, FeedbackType
 from pydantic import BaseModel, Field
 
 from dispatch_cli.utils import (
@@ -19,6 +18,9 @@ from dispatch_cli.utils import (
 )
 from mcp.server.fastmcp import Context, FastMCP
 from mcp.server.session import ServerSession
+
+FeedbackType: TypeAlias = Literal["bug", "feature_request", "general"]
+FeedbackSentiment: TypeAlias = Literal["positive", "negative"]
 
 from ..client import OperatorBackendClient
 from ..config import MCPConfig

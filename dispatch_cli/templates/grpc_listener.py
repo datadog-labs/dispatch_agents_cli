@@ -130,7 +130,7 @@ def _start_llm_proxy(agent_config: dict) -> None:
 
     # Start proxy in a daemon thread (avoids macOS multiprocessing spawn issues)
     def _run_proxy():
-        from dispatch_agents.proxy.server import run_server
+        from dispatch_agents._proxy.server import run_server
 
         run_server(port=proxy_port)
 
@@ -199,7 +199,7 @@ def _start_llm_proxy(agent_config: dict) -> None:
         os.environ.setdefault("DISPATCH_AGENT_NAME", AGENT_NAME)
 
     # Enable auto-instrumentation (patches httpx/requests for trace headers)
-    from dispatch_agents.instrument import auto_instrument
+    from dispatch_agents._instrument import auto_instrument
 
     auto_instrument()
 
@@ -227,10 +227,10 @@ try:
         print(f"Successfully imported entrypoint: {entrypoint_file}", flush=True)
 
         # Import from dispatch_agents to verify registration
-        from dispatch_agents.events import REGISTERED_HANDLERS, TOPIC_HANDLERS
+        from dispatch_agents.events import _REGISTERED_HANDLERS, _TOPIC_HANDLERS
 
-        print(f"Registered handlers: {list(REGISTERED_HANDLERS.keys())}", flush=True)
-        print(f"Topic triggers: {list(TOPIC_HANDLERS.keys())}", flush=True)
+        print(f"Registered handlers: {list(_REGISTERED_HANDLERS.keys())}", flush=True)
+        print(f"Topic triggers: {list(_TOPIC_HANDLERS.keys())}", flush=True)
     else:
         print(f"Warning: Entrypoint file not found: {entrypoint_path}", flush=True)
         raise FileNotFoundError(f"Entrypoint file not found: {entrypoint_path}")
@@ -242,7 +242,7 @@ except Exception as e:
 
 async def main(port=50051):
     """Start the gRPC server for the agent."""
-    from dispatch_agents.grpc_server import serve
+    from dispatch_agents._grpc_server import serve
 
     logger.info(f"Starting gRPC server for agent '{AGENT_NAME}'...")
 

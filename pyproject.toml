@@ -1,11 +1,12 @@
 [project]
 name = "dispatch-cli"
-version = "0.9.6"
+version = "0.10.0"
 description = ""
 authors = [
     {name = "Diamond Bishop", email = "diamond.bishop@datadoghq.com"},
     {name = "Matt Pillari", email = "matthew.pillari@datadoghq.com"},
-    {name = "Jacob LeGrone", email = "jacob.legrone@datadoghq.com"}
+    {name = "Jacob LeGrone", email = "jacob.legrone@datadoghq.com"},
+    {name = "Jack Burns", email = "jack.burns@datadoghq.com"}
 ]
 readme = "README.md"
 requires-python = ">=3.11"
