@@ -65,7 +65,6 @@ Replace the generated `dispatch.yaml` with:
 ```yaml
 namespace: <namespace>
 entrypoint: agent.py
-base_image: python:3.13-slim
 agent_name: fork-claude-<username>
 system_packages: []
 secrets:

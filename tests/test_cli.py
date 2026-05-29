@@ -14,7 +14,7 @@ from dispatch_cli.utils import DISPATCH_DIR, DISPATCH_LISTENER_FILE, DISPATCH_YA
 class TestInitCommand:
     def test_init_creates_dispatch_directory(self):
         """Test that init command creates .dispatch directory with files."""
-        runner = CliRunner(echo_stdin=True)
+        runner = CliRunner()
 
         with tempfile.TemporaryDirectory() as tmpdir:
             # Create a side effect that creates pyproject.toml when uv init is called
