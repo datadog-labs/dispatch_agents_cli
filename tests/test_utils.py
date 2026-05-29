@@ -6,15 +6,40 @@ from pathlib import Path
 from unittest.mock import patch
 
 from dispatch_cli.utils import (
+    DEFAULT_BASE_IMAGE,
     DISPATCH_LISTENER_FILE,
     SDK_DEPENDENCY,
     get_sdk_dependency,
+    get_unsupported_base_image,
     prompt_for_missing_config,
     read_project_config,
     validate_dispatch_project,
 )
 
 SDK_PACKAGE = "dispatch-agents"
+
+
+class TestGetUnsupportedBaseImage:
+    """The platform only supports DEFAULT_BASE_IMAGE; flag anything else."""
+
+    def test_omitted_base_image_is_supported(self):
+        """An absent base_image is the supported configuration."""
+        assert get_unsupported_base_image({}) is None
+
+    def test_none_base_image_is_supported(self):
+        """An explicit None base_image is treated as omitted."""
+        assert get_unsupported_base_image({"base_image": None}) is None
+
+    def test_default_base_image_is_supported(self):
+        """Setting base_image to the platform default is allowed."""
+        assert get_unsupported_base_image({"base_image": DEFAULT_BASE_IMAGE}) is None
+
+    def test_custom_base_image_is_flagged(self):
+        """A custom base_image is returned so the caller can block/warn."""
+        assert (
+            get_unsupported_base_image({"base_image": "python:3.11-slim"})
+            == "python:3.11-slim"
+        )
 
 
 class TestSdkInstallGuidance:
@@ -149,10 +174,10 @@ class TestEntrypointConfig:
             config = {"entrypoint": None}
             with patch(
                 "typer.prompt",
-                side_effect=["test-namespace", "agent.py", "python:3.11-slim", ""],
+                # Order: namespace, entrypoint, system_packages
+                # (base_image prompt was removed — the platform pins it.)
+                side_effect=["test-namespace", "agent.py", ""],
             ):
-                # prompt_for_missing_config returns only the updated config (not a tuple)
-                # Order: namespace, entrypoint, base_image, system_packages
                 config = prompt_for_missing_config(config, path=tmpdir)
                 entrypoint = config["entrypoint"]
 
@@ -197,30 +222,29 @@ class TestPromptForMissingConfig:
         with tempfile.TemporaryDirectory() as tmpdir:
             config = {
                 "entrypoint": None,
-                "base_image": None,
                 "system_packages": None,
             }
 
             with (
                 patch(
                     "typer.prompt",
+                    # Order: namespace, entrypoint, system_packages.
+                    # base_image is no longer prompted — the platform
+                    # pins it to a single backend-controlled image.
                     side_effect=[
                         "test-namespace",
                         "agent.py",
-                        "python:3.11-slim",
                         ["git", "vim"],
                     ],
                 ) as mock_prompt,
                 patch("typer.confirm", return_value=True),
             ):
-                # prompt_for_missing_config returns only the updated config (not a tuple)
                 updated_config = prompt_for_missing_config(config, path=tmpdir)
 
             assert updated_config["entrypoint"] == "agent.py"
             assert updated_config["namespace"] == "test-namespace"
-            assert updated_config["base_image"] == "python:3.11-slim"
             assert updated_config["system_packages"] == ["git", "vim"]
-            assert mock_prompt.call_count == 4
+            assert mock_prompt.call_count == 3
 
     def test_skips_existing_config_options(self):
         """Should not prompt for options already in config."""
@@ -228,7 +252,6 @@ class TestPromptForMissingConfig:
             config = {
                 "entrypoint": "main.py",
                 "namespace": "test-ns",
-                "base_image": None,
             }
             # create main.py with the entrypoint
             with open(os.path.join(tmpdir, "main.py"), "w") as f:
@@ -236,17 +259,13 @@ class TestPromptForMissingConfig:
                     "from dispatch_agents import on\n\n@on(topic='test')\nasync def handler(message: dispatch_agents.Message): pass"
                 )
 
-            with patch(
-                "typer.prompt", side_effect=["python:3.11-slim", []]
-            ) as mock_prompt:
-                # prompt_for_missing_config returns only the updated config (not a tuple)
+            with patch("typer.prompt", side_effect=[[]]) as mock_prompt:
                 updated_config = prompt_for_missing_config(config, path=tmpdir)
 
             # Should keep existing values
             assert updated_config["entrypoint"] == "main.py"
             assert updated_config["namespace"] == "test-ns"
 
-            # Should prompt for missing ones
-            assert updated_config["base_image"] == "python:3.11-slim"
+            # Should prompt for missing system_packages only
             assert updated_config["system_packages"] == []
-            assert mock_prompt.call_count == 2
+            assert mock_prompt.call_count == 1

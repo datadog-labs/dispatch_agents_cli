@@ -1,1 +1,1 @@
-Added support for org-wide network egress allow list configuration
+Custom base_image configurations are now explicitly rejected with an error instead of being silently ignored, ensuring misconfigurations are surfaced immediately.

@@ -451,6 +451,5 @@ With `dispatch.yaml`:
 ```yaml
 namespace: my-namespace
 entrypoint: agent.py
-base_image: python:3.13-slim
 agent_name: my-agent
 ```

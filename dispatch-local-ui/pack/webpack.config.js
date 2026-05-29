@@ -2,8 +2,10 @@ const path = require('path');
 const HtmlWebpackPlugin = require('html-webpack-plugin');
 const MiniCssExtractPlugin = require('mini-css-extract-plugin');
 const CopyWebpackPlugin = require('copy-webpack-plugin');
+const getRouterPort = require('./get-router-port');
 
 const isProduction = process.env.NODE_ENV === 'production';
+const routerPort = getRouterPort();
 const outputPath = path.resolve(__dirname, '../../dispatch_cli/router/static');
 
 module.exports = {
@@ -116,6 +118,13 @@ module.exports = {
     hot: true,
     open: true,
     historyApiFallback: true,
+    proxy: [
+      {
+        context: ['/api', '/health', '/system', '/ui'],
+        target: `http://localhost:${routerPort}`,
+        changeOrigin: true,
+      }
+    ],
   },
 
   // Optimization for production builds

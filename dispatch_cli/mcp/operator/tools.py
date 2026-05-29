@@ -646,7 +646,9 @@ deployment settings. Key configuration options:
 - `agent_name`: Unique identifier for the agent
 - `namespace`: Organization namespace (e.g., "skunkworks")
 - `entrypoint`: Python file with @fn() decorated functions (default: "agent.py")
-- `base_image`: Docker base image (default: "python:3.13-slim")
+
+Note: `base_image` currently only supports python:3.13-slim (the default when
+omitted). Other values are rejected at deploy time.
 
 ### Optional Features
 

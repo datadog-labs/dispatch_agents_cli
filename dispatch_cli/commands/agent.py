@@ -22,6 +22,7 @@ import requests
 import typer
 from dispatch_agents.models import AgentContainerStatus
 from rich.console import Console
+from rich.markup import escape
 from rich.progress import (
     BarColumn,
     Progress,
@@ -50,19 +51,20 @@ from dispatch_cli.registry import (
 from dispatch_cli.secrets import print_secret_sources
 from dispatch_cli.utils import (
     DEFAULT_BASE_IMAGE,
+    DEFAULT_PYTHON_VERSION,
     DISPATCH_API_BASE,
     DISPATCH_DIR,
     DISPATCH_LISTENER_FILE,
     LLM_PROVIDER_KEY_NAMES,
     LOCAL_ROUTER_PORT,
     LOCAL_ROUTER_URL,
-    SUPPORTED_BASE_IMAGES,
     check_dotenv_has_all_secrets,
     check_env_secrets_not_in_config,
     configure_dispatch_project,
     derive_agent_name,
     extract_local_deps_from_pyproject,
     get_sdk_dependency,
+    get_unsupported_base_image,
     has_python_reqs,
     load_dispatch_config,
     validate_dispatch_project,
@@ -531,9 +533,9 @@ def validate_python_version_compatibility(
         True if compatible or no pyproject.toml, False if incompatible (when warn_only=False)
     """
 
-    default_python_version = SUPPORTED_BASE_IMAGES.get(DEFAULT_BASE_IMAGE, "3.13")
-
     import tomlkit
+    from packaging.specifiers import InvalidSpecifier, SpecifierSet
+    from packaging.version import Version
 
     pyproject_path = os.path.join(project_path, "pyproject.toml")
     if not os.path.exists(pyproject_path):
@@ -542,25 +544,38 @@ def validate_python_version_compatibility(
     try:
         with open(pyproject_path) as f:
             doc = tomlkit.parse(f.read())
-        requires = doc.get("project", {}).get("requires-python", "")
-        if requires and isinstance(requires, str):
-            # Check if it excludes the default Python version
-            if (
-                f"<{default_python_version}" in requires
-                or f"<3.{default_python_version.split('.')[1]}" in requires
-            ):
-                logger = get_logger()
-                msg = (
-                    f"requires-python '{requires}' may not work with default base image (Python {default_python_version}). "
-                    f"Consider updating requires-python or setting base_image in .dispatch.yaml"
-                )
-                if warn_only:
-                    logger.warning(msg)
-                    return True
-                logger.error(msg)
     except Exception:
-        pass  # Don't fail on parse errors
-    return True
+        return True  # Don't fail on parse errors
+
+    requires = doc.get("project", {}).get("requires-python", "")
+    if not requires or not isinstance(requires, str):
+        return True
+
+    try:
+        spec = SpecifierSet(requires)
+    except InvalidSpecifier:
+        logger = get_logger()
+        logger.warning(
+            f"Could not parse requires-python='{requires}' in pyproject.toml; "
+            f"skipping Python-version compatibility check."
+        )
+        return True
+
+    runtime = Version(DEFAULT_PYTHON_VERSION)
+    if runtime in spec:
+        return True
+
+    logger = get_logger()
+    msg = (
+        f"requires-python='{requires}' in pyproject.toml excludes Python "
+        f"{DEFAULT_PYTHON_VERSION}, which is the only runtime the platform "
+        f"supports. Update requires-python to include {DEFAULT_PYTHON_VERSION}."
+    )
+    if warn_only:
+        logger.warning(msg)
+        return True
+    logger.error(msg)
+    return False
 
 
 @agent_app.command("init")
@@ -594,13 +609,8 @@ def init(
             # Run 'uv init --bare' to create a minimal pyproject.toml
             logger.debug("Creating minimal pyproject.toml using 'uv init --bare'...")
 
-            # Get Python version from DEFAULT_BASE_IMAGE for requires-python
-
-            default_python_version = SUPPORTED_BASE_IMAGES.get(
-                DEFAULT_BASE_IMAGE, "3.13"
-            )
-
-            # Use -p flag to set Python version
+            # Use -p flag to set Python version to match the platform's
+            # only-supported runtime (DEFAULT_PYTHON_VERSION).
             subprocess.run(
                 [
                     "uv",
@@ -608,7 +618,7 @@ def init(
                     "--bare",
                     "--no-workspace",
                     "-p",
-                    default_python_version,
+                    DEFAULT_PYTHON_VERSION,
                 ],
                 check=True,
                 cwd=path,
@@ -624,11 +634,11 @@ def init(
                 if "project" not in doc:
                     doc["project"] = cast(dict, {})
                 project = cast(dict, doc["project"])
-                project["requires-python"] = f"~={default_python_version}.0"
+                project["requires-python"] = f"~={DEFAULT_PYTHON_VERSION}.0"
                 with open(pyproject_path, "w") as f:
                     f.write(tomlkit.dumps(doc))
                 logger.info(
-                    f"Set requires-python = '~={default_python_version}.0' to match base image"
+                    f"Set requires-python = '~={DEFAULT_PYTHON_VERSION}.0' to match the platform runtime"
                 )
 
             sdk_dep = get_sdk_dependency()
@@ -1873,10 +1883,11 @@ def deploy(
         typer.Option(
             "--force",
             help=(
-                "Skip CLI-side checks (unconfigured-secret block, schema "
-                "compatibility validation) and deploy anyway. Does NOT "
-                "drop egress selectors that violate the org allow list — "
-                "use --allow-egress-drop for that."
+                "Skip CLI-side checks (unconfigured-secret block, "
+                "unsupported base_image block, schema compatibility "
+                "validation) and deploy anyway. Does NOT drop egress "
+                "selectors that violate the org allow list — use "
+                "--allow-egress-drop for that."
             ),
         ),
     ] = False,
@@ -1918,6 +1929,25 @@ def deploy(
             "Add these secrets to dispatch.yaml or use --force to deploy anyway."
         )
         raise typer.Exit(1)
+
+    # Only DEFAULT_BASE_IMAGE is currently supported; block other values
+    # early (the backend rejects them too). Omitting the field uses the default.
+    unsupported_base_image = get_unsupported_base_image(config)
+    if unsupported_base_image:
+        if not force:
+            logger.error(
+                f"Deployment blocked: base_image '{unsupported_base_image}' is "
+                "not supported."
+            )
+            logger.info(
+                f"Set base_image to {DEFAULT_BASE_IMAGE} (or omit it), or use "
+                "--force to deploy anyway."
+            )
+            raise typer.Exit(1)
+        logger.warning(
+            f"base_image '{unsupported_base_image}' is not supported and will be "
+            "rejected by the backend. Deploying anyway because --force was passed."
+        )
 
     # Warn if dispatch.yaml secrets include LLM provider API keys
     # These work as fallback credentials but the preferred approach is the LLM gateway
@@ -2210,10 +2240,14 @@ def deploy(
                         rendered = (
                             sel.get("match_name") or sel.get("match_pattern") or ""
                         )
-                        logger.error(f"egress domain '{rendered}' violates org policy")
-                    logger.error(error)
+                        # escape(): server strings may contain "[...]" which the
+                        # Rich-backed logger would otherwise parse as markup tags.
+                        logger.error(
+                            f"egress domain '{escape(rendered)}' violates org policy"
+                        )
+                    logger.error(escape(error))
                     raise typer.Exit(2)
-                logger.error(f"Deployment failed: {error}")
+                logger.error(f"Deployment failed: {escape(error)}")
                 raise typer.Exit(1)
             elif job_status == "cancelled":
                 logger.warning("Deployment was cancelled.")
