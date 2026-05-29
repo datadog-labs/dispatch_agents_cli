@@ -3,6 +3,7 @@
 const webpack = require('webpack');
 const WebpackDevServer = require('webpack-dev-server');
 const path = require('path');
+const getRouterPort = require('./get-router-port');
 
 // Import webpack configuration
 const config = require('./webpack.config.js');
@@ -24,11 +25,15 @@ const runServer = async () => {
   console.log('🌐 Starting development server...');
   await server.start();
 
+  const routerPort = getRouterPort();
   console.log('✅ Development server running at:');
   console.log(`   http://localhost:${devServerOptions.port}`);
   console.log('');
   console.log('📝 This is a development preview of the Local UI.');
   console.log('   Changes will be automatically reflected.');
+  console.log(`   Proxying API requests to router on port ${routerPort}`);
+  console.log('   Override with: LOCAL_ROUTER_PORT=<port> npm run dev');
+  console.log('');
   console.log('   To build for CLI integration, run: npm run build');
 };
 

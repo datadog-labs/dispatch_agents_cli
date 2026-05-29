@@ -38,15 +38,17 @@ LLM_PROVIDER_KEY_NAMES = {
 }
 AGENT_DIR = "."
 
-DEFAULT_BASE_IMAGE = "python:3.13-slim"
+# The platform builds every agent on a single, backend-controlled
+# base image. The Python version here is the runtime the agent's
+# pyproject.toml `requires-python` must be compatible with.
+#
+# Keep in sync with backend/build_templates/build_config.json
+# (default_python_version). If you bump Python here, bump there too.
+DEFAULT_PYTHON_VERSION = "3.13"
 
-# Supported base images with their Python versions for wheel downloads
-SUPPORTED_BASE_IMAGES = {
-    "python:3.11-slim": "3.11",
-    "python:3.12-slim": "3.12",
-    "python:3.12-slim-trixie": "3.12",
-    "python:3.13-slim": "3.13",
-}
+# The base image the platform currently supports. `dispatch agent deploy`
+# blocks any other value unless --force; omitting the field uses this default.
+DEFAULT_BASE_IMAGE = "python:3.13-slim"
 
 DISPATCH_REQUIREMENTS = [
     "grpcio",
@@ -88,10 +90,6 @@ INTERACTIVE_CONFIG_OPTIONS: dict[str, dict] = {
     "entrypoint": {
         "text": "Entrypoint Python file (with agent handlers)",
         "default": "agent.py",
-    },
-    "base_image": {
-        "text": "Base Docker image",
-        "default": DEFAULT_BASE_IMAGE,
     },
     "system_packages": {
         "text": "Additional system packages (space-separated)",
@@ -376,8 +374,8 @@ def _apply_default_values(
 ) -> dict:
     updated = copy.deepcopy(config)
 
-    if not updated.get("base_image"):
-        updated["base_image"] = DEFAULT_BASE_IMAGE
+    # base_image is intentionally not prepopulated. Omitting it uses the
+    # platform default; an unsupported value is rejected at deploy time.
 
     updated["system_packages"] = _merge_system_packages(updated.get("system_packages"))
     updated["local_dependencies"] = _coerce_dict(
@@ -594,6 +592,19 @@ def _add_secrets_to_yaml(path: str, config: dict, secret_names: list[str]) -> No
     data["secrets"] = secrets_list
     with open(yaml_path, "w", encoding="utf-8") as fh:
         yaml.dump(data, fh, default_flow_style=False, sort_keys=False)
+
+
+def get_unsupported_base_image(config: dict) -> str | None:
+    """Return the configured base_image if it isn't a currently supported value.
+
+    Omitting the field or setting it to ``DEFAULT_BASE_IMAGE`` is supported;
+    any other value is returned so the caller can block. Returns ``None`` when
+    the value is supported.
+    """
+    base_image = config.get("base_image")
+    if base_image and base_image != DEFAULT_BASE_IMAGE:
+        return str(base_image)
+    return None
 
 
 def check_env_secrets_not_in_config(path: str, config: dict) -> list[str]:

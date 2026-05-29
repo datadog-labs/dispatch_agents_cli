@@ -104,7 +104,7 @@ class TestMCPCommands:
             await list_namespaces(ListNamespacesRequest())
 
     def test_register_operator_fails_closed_when_invalid_api_key(
-        self, runner: CliRunner
+        self, runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ):
         provider = StaticCredentialProvider(
             ResolvedCredential(auth_mode="api_key", access_token="invalid-token")
@@ -117,32 +117,30 @@ class TestMCPCommands:
         )
         backend_client.list_namespaces.side_effect = auth_error
 
-        with runner.isolated_filesystem():
-            with (
-                patch.dict(
-                    "os.environ", {"DISPATCH_API_KEY": "dak_invalid"}, clear=False
-                ),
-                patch("dispatch_cli.main.check_and_notify_cli_update"),
-                patch(
-                    "dispatch_cli.commands.mcp.default_credential_provider",
-                    return_value=provider,
-                ),
-                patch(
-                    "dispatch_cli.commands.mcp.default_operator_backend_client",
-                    return_value=backend_client,
-                ),
-            ):
-                result = runner.invoke(
-                    app,
-                    ["mcp", "serve", "operator", "--register", "codex"],
-                )
+        monkeypatch.chdir(tmp_path)
+        with (
+            patch.dict("os.environ", {"DISPATCH_API_KEY": "dak_invalid"}, clear=False),
+            patch("dispatch_cli.main.check_and_notify_cli_update"),
+            patch(
+                "dispatch_cli.commands.mcp.default_credential_provider",
+                return_value=provider,
+            ),
+            patch(
+                "dispatch_cli.commands.mcp.default_operator_backend_client",
+                return_value=backend_client,
+            ),
+        ):
+            result = runner.invoke(
+                app,
+                ["mcp", "serve", "operator", "--register", "codex"],
+            )
 
-            assert result.exit_code == 1
-            assert "Authentication verified" not in result.output
-            assert "DISPATCH_API_KEY" in result.output
-            assert "Error: 1" not in result.output
-            assert not Path(".codex/config.toml").exists()
-            backend_client.close.assert_called_once_with()
+        assert result.exit_code == 1
+        assert "Authentication verified" not in result.output
+        assert "DISPATCH_API_KEY" in result.output
+        assert "Error: 1" not in result.output
+        assert not Path(".codex/config.toml").exists()
+        backend_client.close.assert_called_once_with()
 
     @pytest.mark.parametrize(
         ("credential", "environment", "expected_env"),
@@ -164,6 +162,8 @@ class TestMCPCommands:
     def test_register_operator_success_cases(
         self,
         runner: CliRunner,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
         credential: ResolvedCredential,
         environment: dict[str, str],
         expected_env: dict[str, str] | None,
@@ -172,35 +172,35 @@ class TestMCPCommands:
         backend_client = Mock()
         backend_client.list_namespaces.return_value = {"namespaces": []}
 
-        with runner.isolated_filesystem():
-            with (
-                patch.dict("os.environ", environment, clear=True),
-                patch("dispatch_cli.main.check_and_notify_cli_update"),
-                patch(
-                    "dispatch_cli.commands.mcp.default_credential_provider",
-                    return_value=provider,
-                ),
-                patch(
-                    "dispatch_cli.commands.mcp.default_operator_backend_client",
-                    return_value=backend_client,
-                ),
-            ):
-                result = runner.invoke(
-                    app,
-                    ["mcp", "serve", "operator", "--register", "codex"],
-                )
+        monkeypatch.chdir(tmp_path)
+        with (
+            patch.dict("os.environ", environment, clear=True),
+            patch("dispatch_cli.main.check_and_notify_cli_update"),
+            patch(
+                "dispatch_cli.commands.mcp.default_credential_provider",
+                return_value=provider,
+            ),
+            patch(
+                "dispatch_cli.commands.mcp.default_operator_backend_client",
+                return_value=backend_client,
+            ),
+        ):
+            result = runner.invoke(
+                app,
+                ["mcp", "serve", "operator", "--register", "codex"],
+            )
 
-            assert result.exit_code == 0
-            assert "Authentication verified" in result.output
-            config_path = Path(".codex/config.toml")
-            assert config_path.exists()
-            config = tomllib.loads(config_path.read_text())
-            server = config["mcp_servers"]["dispatch_operator"]
-            if expected_env is None:
-                assert "env" not in server
-            else:
-                assert server["env"] == expected_env
-            backend_client.close.assert_called_once_with()
+        assert result.exit_code == 0
+        assert "Authentication verified" in result.output
+        config_path = Path(".codex/config.toml")
+        assert config_path.exists()
+        config = tomllib.loads(config_path.read_text())
+        server = config["mcp_servers"]["dispatch_operator"]
+        if expected_env is None:
+            assert "env" not in server
+        else:
+            assert server["env"] == expected_env
+        backend_client.close.assert_called_once_with()
 
 
 class TestDispatchAPIClient:
