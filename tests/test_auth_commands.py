@@ -43,6 +43,8 @@ class TestLoginCommand:
         assert stored is not None
         assert stored.user_email == "user@example.com"
         assert "Logged in with browser auth" in result.output
+        assert "Organization: Example Org" in result.output
+        assert "org_123" not in result.output
 
     def test_login_surfaces_oauth_flow_failure(self, runner):
         login_flow = Mock()
@@ -170,7 +172,8 @@ class TestWhoAmICommand:
         assert result.exit_code == 0
         assert "Auth mode: oauth" in result.output
         assert "User: user@example.com" in result.output
-        assert "Organization: Example Org (org_123)" in result.output
+        assert "Organization: Example Org" in result.output
+        assert "org_123" not in result.output
 
     def test_whoami_shows_api_key_mode(self, runner):
         provider = StaticCredentialProvider(

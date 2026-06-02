@@ -363,7 +363,7 @@ class BrowserLoginFlow:
     def _select_organization(self, organizations: list[AuthOrganization]) -> str:
         choices = [
             questionary.Choice(
-                title=f"{organization.display_name} ({organization.id})",
+                title=organization.display_name,
                 value=organization.id,
             )
             for organization in organizations
