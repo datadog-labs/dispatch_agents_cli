@@ -267,6 +267,34 @@ class TestBrowserLoginFlow:
         assert session.org_id == "org_456"
         flow._select_organization.assert_called_once()
 
+    def test_org_prompt_choices_hide_auth0_ids(self):
+        flow = BrowserLoginFlow(
+            AuthClientConfig(
+                domain="tenant.auth0.com",
+                client_id="client_123",
+                audience="aud",
+            )
+        )
+
+        with patch("dispatch_cli.auth_login.questionary.select") as select:
+            select.return_value.ask.return_value = "org_456"
+
+            selected = flow._select_organization(
+                [
+                    AuthOrganization(
+                        id="org_123", name="first", display_name="First Org"
+                    ),
+                    AuthOrganization(
+                        id="org_456", name="chosen", display_name="Chosen Org"
+                    ),
+                ]
+            )
+
+        assert selected == "org_456"
+        choices = select.call_args.kwargs["choices"]
+        assert [choice.title for choice in choices] == ["First Org", "Chosen Org"]
+        assert [choice.value for choice in choices] == ["org_123", "org_456"]
+
     def test_raises_when_user_has_no_organizations(self):
         flow = BrowserLoginFlow(
             AuthClientConfig(

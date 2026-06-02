@@ -112,10 +112,8 @@ def login(
     logger.success("Logged in with browser auth")
     if session.user_email:
         logger.info(f"User: {session.user_email}")
-    if session.org_display_name and session.org_id:
-        logger.info(f"Organization: {session.org_display_name} ({session.org_id})")
-    elif session.org_id:
-        logger.info(f"Organization: {session.org_id}")
+    if session.org_display_name:
+        logger.info(f"Organization: {session.org_display_name}")
 
 
 @app.command()
@@ -169,12 +167,8 @@ def whoami():
 
     if credential.user_email:
         logger.info(f"User: {credential.user_email}")
-    if credential.org_display_name and credential.org_id:
-        logger.info(
-            f"Organization: {credential.org_display_name} ({credential.org_id})"
-        )
-    elif credential.org_id:
-        logger.info(f"Organization: {credential.org_id}")
+    if credential.org_display_name:
+        logger.info(f"Organization: {credential.org_display_name}")
 
     try:
         session = default_auth_session_store().load()
