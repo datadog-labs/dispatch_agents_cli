@@ -77,6 +77,42 @@ class DeployAgentRequest(BaseModel):
     """Request payload for deploying an agent."""
 
     agent_directory: str = Field(description="Path to the agent directory")
+    overwrite: bool = Field(
+        default=False,
+        description=(
+            "Set true to overwrite an existing agent that was created by a "
+            "different user. You can always overwrite your own agents without "
+            "this flag. When false (default), deploying over an agent owned by "
+            "someone else is blocked so a downloaded/cloned agent isn't "
+            "clobbered by accident. To deploy as a NEW agent instead, change "
+            "`agent_name` in the directory's dispatch.yaml before deploying."
+        ),
+    )
+
+
+class DownloadAgentSourceRequest(BaseModel):
+    """Request payload for downloading an agent's source."""
+
+    agent_name: str = Field(description="Name of the agent to download")
+    destination_directory: str | None = Field(
+        default=None,
+        description=(
+            "Directory to extract the source into. Defaults to "
+            "./<agent-name>/ relative to the current working directory."
+        ),
+    )
+    namespace: str | None = Field(
+        default=None,
+        description=(
+            "Namespace the agent lives in. Required — pass it explicitly or "
+            "rely on the server's configured default. Use list_namespaces to "
+            "discover valid namespaces."
+        ),
+    )
+    force: bool = Field(
+        default=False,
+        description="Extract even if the destination directory already exists and is non-empty.",
+    )
 
 
 class GetDeployStatusRequest(BaseModel):
@@ -350,6 +386,16 @@ class DeployAgentResponse(BaseModel):
         default=None,
         description="Namespace the agent is being deployed to",
     )
+
+
+class DownloadAgentSourceResponse(BaseModel):
+    """Response from downloading an agent's source."""
+
+    agent_name: str = Field(description="Name of the downloaded agent")
+    destination_directory: str = Field(
+        description="Absolute path the source was extracted into"
+    )
+    message: str = Field(description="Human-readable result message")
 
 
 class DeployStageInfo(BaseModel):
@@ -972,12 +1018,23 @@ namespace: {ns}
     ) -> DeployAgentResponse:
         """Deploy an agent from directory (auto-discovers namespace from dispatch.yaml).
 
+        If an agent with the same name already exists and was created by a
+        different user, the deploy is blocked unless `overwrite=true` — this
+        stops a downloaded/cloned agent from accidentally overwriting someone
+        else's original. You can always overwrite your own agents. Two ways to
+        proceed when blocked:
+          - To OVERWRITE another user's existing agent, set `overwrite=true`.
+          - To deploy as a NEW, separate agent, change `agent_name` in the
+            directory's dispatch.yaml first, then deploy.
+
         Args:
-            request: DeployAgentRequest with agent_directory
+            request: DeployAgentRequest with agent_directory and optional overwrite
             ctx: MCP context for logging
 
         Returns:
-            DeployAgentResponse with agent_name, status, and deployment message
+            DeployAgentResponse with agent_name, status, and deployment message.
+            status is "blocked" (and no job_id) when the agent is owned by
+            another user and overwrite was not set.
         """
         # Convert to absolute path for consistency
         abs_agent_dir = os.path.abspath(request.agent_directory)
@@ -988,15 +1045,17 @@ namespace: {ns}
 
         await ctx.info(f"Starting deployment of agent '{agent_name}'")
 
-        # Run dispatch agent deploy with --force --no-wait so it returns
-        # after uploading the image without blocking on the full deployment.
-        # --force avoids typer.confirm prompts (stdin is DEVNULL).
+        # Run dispatch agent deploy with --force --no-wait so it returns after
+        # uploading the image without blocking on the full deployment. --force
+        # suppresses typer prompts (stdin is DEVNULL) and skips pre-deploy
+        # validation. Ownership is enforced server-side: --overwrite is only
+        # passed through when the caller explicitly sets overwrite=true, so a
+        # deploy over another user's agent is blocked unless requested.
+        deploy_args = ["dispatch", "agent", "deploy", "--force", "--no-wait"]
+        if request.overwrite:
+            deploy_args.append("--overwrite")
         process = await asyncio.create_subprocess_exec(
-            "dispatch",
-            "agent",
-            "deploy",
-            "--force",
-            "--no-wait",
+            *deploy_args,
             cwd=abs_agent_dir,
             stdin=asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE,
@@ -1027,6 +1086,23 @@ namespace: {ns}
 
         if process.returncode != 0:
             error_msg = "\n".join(stderr_lines) or "\n".join(stdout_lines)
+            # The ownership gate (CLI preflight or backend 403) surfaces a
+            # message naming the owner and telling the user to pass --overwrite.
+            # Return actionable guidance instead of a hard error so the caller
+            # can re-run with overwrite=true or rename the agent.
+            if "--overwrite" in error_msg:
+                check_ns = agent_config.get("namespace") or config.namespace
+                return DeployAgentResponse(
+                    agent_name=agent_name,
+                    status="blocked",
+                    message=(
+                        f"{error_msg}\n\nRe-run with overwrite=true to overwrite "
+                        "it, or change `agent_name` in the directory's "
+                        "dispatch.yaml to deploy it as a new agent."
+                    ),
+                    job_id=None,
+                    namespace=str(check_ns) if check_ns else None,
+                )
             await ctx.error(f"Deployment failed: {error_msg}")
             raise RuntimeError(f"Failed to deploy agent: {error_msg}")
 
@@ -1053,6 +1129,80 @@ namespace: {ns}
             message=message,
             job_id=job_id,
             namespace=deploy_namespace,
+        )
+
+    @mcp.tool()
+    async def download_agent_source(
+        request: DownloadAgentSourceRequest,
+        ctx: Context[ServerSession, None],
+    ) -> DownloadAgentSourceResponse:
+        """Download a deployed agent's source into a local directory.
+
+        Fetches the agent's source bundle and extracts it (flattening the
+        packaging wrapper) into `destination_directory`, defaulting to
+        ./<agent-name>/. The current dispatch.yaml is included even if it was
+        edited after the last deploy (e.g. via the UI or a fork).
+
+        A namespace is required (pass `namespace` or rely on the configured
+        default). After downloading, to deploy this source:
+          - as the SAME agent (overwriting it), call deploy_agent — add
+            overwrite=true if it was created by a different user;
+          - as a NEW agent, change `agent_name` in the downloaded
+            dispatch.yaml first, then call deploy_agent.
+
+        Args:
+            request: DownloadAgentSourceRequest with agent_name, optional
+                destination_directory, namespace, and force
+            ctx: MCP context for logging
+
+        Returns:
+            DownloadAgentSourceResponse with the destination path.
+        """
+        ns = _get_namespace(request.namespace)
+        dest = (
+            os.path.abspath(request.destination_directory)
+            if request.destination_directory
+            else os.path.join(os.getcwd(), request.agent_name)
+        )
+
+        await ctx.info(
+            f"Downloading source for agent '{request.agent_name}' into {dest}"
+        )
+
+        cmd = [
+            "dispatch",
+            "agent",
+            "clone",
+            request.agent_name,
+            "--namespace",
+            ns,
+            "--path",
+            dest,
+        ]
+        if request.force:
+            cmd.append("--force")
+
+        process = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdin=asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout_b, stderr_b = await process.communicate()
+        if process.returncode != 0:
+            error_msg = stderr_b.decode().strip() or stdout_b.decode().strip()
+            await ctx.error(f"Download failed: {error_msg}")
+            raise RuntimeError(f"Failed to download agent source: {error_msg}")
+
+        return DownloadAgentSourceResponse(
+            agent_name=request.agent_name,
+            destination_directory=dest,
+            message=(
+                f"Downloaded '{request.agent_name}' into {dest}. To deploy as a "
+                "new agent, change agent_name in dispatch.yaml first; to "
+                "overwrite an agent created by another user, deploy with "
+                "overwrite=true."
+            ),
         )
 
     @mcp.tool()

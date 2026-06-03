@@ -1,1 +1,1 @@
-Add improvements/clarity to user facing CLI output.
+New command: dispatch agent clone {agent_name} --namespace {namespace} to download agent source code. Dispatch agent deploy now required --overwrite flag to be passed before deploying an agent that would overwrite an agent created by another user.
