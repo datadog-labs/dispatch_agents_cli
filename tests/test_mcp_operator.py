@@ -475,3 +475,160 @@ class TestPIDFileLifecycle:
 
             # Verify PID file was still cleaned up
             assert not pid_file.exists()
+
+
+def _make_operator(client: OperatorBackendClient):
+    """Build an operator MCP server backed by the given fake client."""
+    from dispatch_cli.mcp.config import MCPConfig
+    from dispatch_cli.mcp.operator.tools import create_operator_mcp
+
+    config = MCPConfig(
+        credential_provider=StaticCredentialProvider(
+            ResolvedCredential(auth_mode="api_key", access_token="test-key")
+        ),
+        namespace="test-ns",
+    )
+    return create_operator_mcp(client, config)
+
+
+def _write_agent_dir(tmp: str, agent_name: str) -> str:
+    with open(os.path.join(tmp, "dispatch.yaml"), "w") as f:
+        f.write(f"agent_name: {agent_name}\nnamespace: test-ns\n")
+    return tmp
+
+
+class _FakeStream:
+    """Async-iterable stand-in for a subprocess stdout/stderr stream."""
+
+    def __init__(self, lines: list[bytes]):
+        self._lines = lines
+
+    def __aiter__(self):
+        async def gen():
+            for line in self._lines:
+                yield line
+
+        return gen()
+
+
+class _FakeProcess:
+    def __init__(self, stdout_lines: list[bytes]):
+        self.stdout = _FakeStream(stdout_lines)
+        self.stderr = _FakeStream([])
+        self.returncode = 0
+
+    async def wait(self) -> int:
+        return self.returncode
+
+
+class _FakeCtx:
+    """Minimal MCP Context — the tool only calls these logging coroutines."""
+
+    async def info(self, *args, **kwargs) -> None:
+        pass
+
+    async def debug(self, *args, **kwargs) -> None:
+        pass
+
+    async def error(self, *args, **kwargs) -> None:
+        pass
+
+
+def _tool_fn(mcp, name: str):
+    """Return a tool's underlying function so it can be called with a fake ctx.
+
+    Going through mcp.call_tool would require an active request context (for
+    ctx logging); calling the function directly sidesteps that.
+    """
+    return mcp._tool_manager.get_tool(name).fn
+
+
+@pytest.mark.unit
+class TestDeployAgentGuard:
+    """The deploy_agent tool must not silently overwrite another user's agent.
+
+    Ownership is enforced server-side (and pre-checked by the CLI), so the tool
+    just shells out and surfaces the resulting block as a "blocked" status.
+    """
+
+    @pytest.mark.asyncio
+    async def test_blocks_agent_owned_by_another_user(self):
+        from dispatch_cli.mcp.operator.tools import DeployAgentRequest
+
+        deploy = _tool_fn(_make_operator(FakeOperatorBackendClient()), "deploy_agent")
+        # The CLI exits non-zero with a message naming the owner and pointing
+        # at --overwrite when the agent belongs to someone else.
+        fake_proc = _FakeProcess([])
+        fake_proc.stderr = _FakeStream(
+            [
+                b"Agent 'existing-agent' already exists in namespace 'test-ns' "
+                b"and is owned by alice@example.com. Pass --overwrite to "
+                b"overwrite it.\n"
+            ]
+        )
+        fake_proc.returncode = 1
+
+        async def fake_exec(*args, **kwargs):
+            return fake_proc
+
+        with tempfile.TemporaryDirectory() as tmp:
+            _write_agent_dir(tmp, "existing-agent")
+            with patch("asyncio.create_subprocess_exec", side_effect=fake_exec):
+                result = await deploy(
+                    DeployAgentRequest(agent_directory=tmp), _FakeCtx()
+                )
+
+        assert result.status == "blocked"
+        assert result.job_id is None
+        assert "alice@example.com" in result.message
+        assert "overwrite=true" in result.message
+
+    @pytest.mark.asyncio
+    async def test_overwrite_true_passes_flag_to_cli(self):
+        from dispatch_cli.mcp.operator.tools import DeployAgentRequest
+
+        deploy = _tool_fn(_make_operator(FakeOperatorBackendClient()), "deploy_agent")
+        fake_proc = _FakeProcess(
+            [b"DEPLOY_JOB_ID=job-123\n", b"DEPLOY_NAMESPACE=test-ns\n"]
+        )
+        captured_args: list = []
+
+        async def fake_exec(*args, **kwargs):
+            captured_args.extend(args)
+            return fake_proc
+
+        with tempfile.TemporaryDirectory() as tmp:
+            _write_agent_dir(tmp, "existing-agent")
+            with patch("asyncio.create_subprocess_exec", side_effect=fake_exec):
+                result = await deploy(
+                    DeployAgentRequest(agent_directory=tmp, overwrite=True), _FakeCtx()
+                )
+
+        assert "--overwrite" in captured_args
+        assert result.status == "submitted"
+        assert result.job_id == "job-123"
+
+    @pytest.mark.asyncio
+    async def test_owner_deploys_without_overwrite_flag(self):
+        from dispatch_cli.mcp.operator.tools import DeployAgentRequest
+
+        deploy = _tool_fn(_make_operator(FakeOperatorBackendClient()), "deploy_agent")
+        fake_proc = _FakeProcess(
+            [b"DEPLOY_JOB_ID=job-9\n", b"DEPLOY_NAMESPACE=test-ns\n"]
+        )
+        captured_args: list = []
+
+        async def fake_exec(*args, **kwargs):
+            captured_args.extend(args)
+            return fake_proc
+
+        with tempfile.TemporaryDirectory() as tmp:
+            _write_agent_dir(tmp, "brand-new-agent")
+            with patch("asyncio.create_subprocess_exec", side_effect=fake_exec):
+                result = await deploy(
+                    DeployAgentRequest(agent_directory=tmp), _FakeCtx()
+                )
+
+        assert "--overwrite" not in captured_args
+        assert result.status == "submitted"
+        assert result.job_id == "job-9"

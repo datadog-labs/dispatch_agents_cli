@@ -35,6 +35,7 @@ from rich.table import Table
 from watchfiles import PythonFilter, watch
 
 from dispatch_cli.auth import get_auth_headers, handle_auth_error
+from dispatch_cli.auth_provider import default_credential_provider
 from dispatch_cli.commands.router import (
     get_active_router,
     start_router_background,
@@ -506,6 +507,76 @@ def build_namespaced_url(endpoint: str, namespace: str) -> str:
         if endpoint.startswith(prefix):
             return f"{DISPATCH_API_BASE}/api/unstable/namespace/{namespace}{endpoint}"
     raise ValueError(f"Unmapped endpoint prefix: {endpoint!r}")
+
+
+def _current_user_email() -> str | None:
+    """Best-effort current user email for the local ownership preflight.
+
+    Returns ``None`` when identity can't be determined client-side (e.g.
+    API-key auth), in which case the caller defers the ownership decision
+    to the backend, which enforces it authoritatively.
+    """
+    try:
+        credential = default_credential_provider().resolve()
+    except Exception:
+        return None
+    return credential.user_email
+
+
+def _confirm_overwrite_if_exists(*, agent_name: str, namespace: str) -> None:
+    """Block a deploy from overwriting an agent owned by someone else.
+
+    Calls ``GET /agents/{name}``: 404 means new agent (proceed). If the agent
+    exists and the current user created it, the deploy proceeds without a flag.
+    If it's owned by a different user, exit non-zero and tell them to pass
+    ``--overwrite``. When the current identity can't be resolved locally (e.g.
+    API-key auth), defer to the backend, which enforces ownership too. Any
+    non-200/404 status is treated as transient and the deploy continues so we
+    don't gate releases on a flaky existence probe.
+    """
+    logger = get_logger()
+    try:
+        response = requests.get(
+            build_namespaced_url(f"/agents/{agent_name}", namespace),
+            headers=get_auth_headers(),
+            timeout=15,
+        )
+    except requests.exceptions.RequestException as exc:
+        logger.warning(
+            f"Could not verify whether agent '{agent_name}' already exists "
+            f"({exc}). Proceeding with deploy."
+        )
+        return
+
+    if response.status_code == 404:
+        return
+    if response.status_code != 200:
+        logger.warning(
+            f"Unexpected status {response.status_code} checking for existing "
+            f"agent '{agent_name}'. Proceeding with deploy."
+        )
+        return
+
+    # Agent exists. Owners may overwrite their own agent without a flag.
+    owner = (response.json().get("metadata") or {}).get("created_by")
+    current_user = _current_user_email()
+    if current_user is None:
+        # Can't determine identity locally (e.g. API key). Let the backend
+        # decide — it returns 403 if this isn't the owner and --overwrite
+        # wasn't passed.
+        return
+    if owner == current_user:
+        return
+
+    logger.error(
+        f"Agent '{agent_name}' already exists in namespace '{namespace}' and "
+        f"is owned by {owner or 'another user'}. Pass --overwrite to overwrite it."
+    )
+    logger.info(
+        "To deploy this as a separate agent instead, change `agent_name` "
+        "or `namespace` in dispatch.yaml and deploy again."
+    )
+    raise typer.Exit(1)
 
 
 def uv_is_installed() -> bool:
@@ -1905,6 +1976,17 @@ def deploy(
             ),
         ),
     ] = False,
+    overwrite: Annotated[
+        bool,
+        typer.Option(
+            "--overwrite",
+            help=(
+                "Overwrite an existing agent of the same name that was "
+                "created by a different user. You can always overwrite your "
+                "own agents without this flag."
+            ),
+        ),
+    ] = False,
     no_wait: Annotated[
         bool,
         typer.Option(
@@ -1975,6 +2057,14 @@ def deploy(
         )
         raise typer.Exit(1)
     agent_name = get_agent_name_from_project(abs_path, config)
+
+    # Ownership check: block overwriting an agent owned by another user
+    # unless --overwrite is passed. Owners may overwrite their own agents
+    # freely. --force skips this local probe (the established "I know what
+    # I'm doing" escape hatch), but only --overwrite is propagated to the
+    # server, so the backend ownership gate still applies to a --force deploy.
+    if not (overwrite or force):
+        _confirm_overwrite_if_exists(agent_name=agent_name, namespace=namespace)
 
     # Check SDK version (every deploy)
     detected_sdk_version = get_sdk_version_from_agent(abs_path)
@@ -2139,6 +2229,7 @@ def deploy(
                     "agent_name": agent_name,
                     "namespace": namespace,
                     "force": "true" if allow_egress_drop else "false",
+                    "overwrite": "true" if overwrite else "false",
                 },
                 headers=auth_headers,
                 timeout=600,
@@ -2147,6 +2238,21 @@ def deploy(
     except requests.exceptions.HTTPError as e:
         if e.response.status_code == 401:  # Unauthorized
             handle_auth_error("Invalid or expired API key")
+        if e.response.status_code == 403:  # Owned by another user
+            # Surface the backend detail verbatim — it names the owner and
+            # tells the user to pass --overwrite.
+            try:
+                detail = e.response.json().get("detail")
+            except ValueError:
+                detail = None
+            logger.error(
+                detail
+                or (
+                    f"Agent '{agent_name}' is owned by another user. "
+                    "Pass --overwrite to overwrite it."
+                )
+            )
+            raise typer.Exit(1)
         if e.response.status_code == 409:
             logger.error(
                 f"A deployment is already in progress for agent '{agent_name}'. "
@@ -2258,6 +2364,140 @@ def deploy(
     except Exception as e:
         logger.error(f"Agent image failed to be deployed to production: {e}")
         raise typer.Exit(1)
+
+
+def _strip_agent_prefix_filter(member: tarfile.TarInfo, dest_path: str):
+    """Extraction filter that flattens the packager's ``agent/`` wrapper.
+
+    ``create_source_package`` nests everything under a top-level ``agent/``
+    directory, so a naive extract produces ``<dest>/agent/<files>``. This
+    filter first runs the stdlib ``data`` safety filter (path-traversal /
+    device-file protection) and then strips the leading ``agent/`` segment
+    so a clone lands as ``<dest>/<files>``. Bare directory entries for the
+    root and ``agent`` itself are dropped (return ``None``).
+    """
+    safe = tarfile.data_filter(member, dest_path)
+    if safe is None:
+        return None
+    name = safe.name
+    while name.startswith("./"):
+        name = name[2:]
+    if name in ("", "agent"):
+        return None
+    if name.startswith("agent/"):
+        name = name[len("agent/") :]
+    if not name:
+        return None
+    safe.name = name
+    return safe
+
+
+@agent_app.command("clone")
+def clone(
+    agent_name: Annotated[
+        str,
+        typer.Argument(help="Name of the agent to clone from the remote server."),
+    ],
+    namespace: Annotated[
+        str | None,
+        typer.Option(
+            help="Namespace the agent lives in.",
+            envvar="DISPATCH_NAMESPACE",
+        ),
+    ] = None,
+    path: Annotated[
+        str | None,
+        typer.Option(
+            "--path",
+            help="Destination directory. Defaults to ./<agent-name>/.",
+        ),
+    ] = None,
+    force: Annotated[
+        bool,
+        typer.Option(
+            "--force",
+            help="Extract into the destination directory even if it already exists and is non-empty.",
+        ),
+    ] = False,
+):
+    """Download an agent's source bundle from the remote server."""
+    logger = get_logger()
+
+    if not namespace:
+        logger.error(
+            "Namespace is required. Pass --namespace or set DISPATCH_NAMESPACE."
+        )
+        raise typer.Exit(1)
+
+    dest_dir = Path(path) if path else Path.cwd() / agent_name
+    if dest_dir.exists() and any(dest_dir.iterdir()) and not force:
+        logger.error(
+            f"Destination '{dest_dir}' already exists and is non-empty. "
+            "Pass --force to extract into it anyway."
+        )
+        raise typer.Exit(1)
+
+    url = build_namespaced_url(f"/agents/{agent_name}/source", namespace)
+    logger.info(
+        f"Downloading source for agent '{agent_name}' from namespace '{namespace}'..."
+    )
+
+    try:
+        response = requests.get(
+            url, headers=get_auth_headers(), stream=True, timeout=120
+        )
+        response.raise_for_status()
+    except requests.exceptions.HTTPError as exc:
+        status = exc.response.status_code if exc.response is not None else None
+        detail = ""
+        if exc.response is not None:
+            try:
+                detail = exc.response.json().get("detail", "")
+            except Exception:
+                detail = exc.response.text
+        if status in (401, 403):
+            handle_auth_error("Invalid or expired credential")  # exits
+        logger.error(f"Failed to download agent source (HTTP {status}): {detail}")
+        raise typer.Exit(1)
+    except requests.exceptions.RequestException as exc:
+        logger.error(f"Failed to download agent source: {exc}")
+        raise typer.Exit(1)
+
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        with tarfile.open(fileobj=BytesIO(response.content), mode="r:gz") as tar:
+            tar.extractall(path=dest_dir, filter=_strip_agent_prefix_filter)
+    except tarfile.TarError as exc:
+        logger.error(f"Failed to extract agent source: {exc}")
+        raise typer.Exit(1)
+
+    # The packager always creates a `dependencies/` directory even when the
+    # agent bundles no local/git deps, leaving an empty folder in the clone.
+    # Drop it so a fresh clone isn't littered with an empty directory; it's
+    # regenerated on the next deploy if needed.
+    deps_dir = dest_dir / "dependencies"
+    if deps_dir.is_dir() and not any(deps_dir.iterdir()):
+        deps_dir.rmdir()
+
+    # Overlay the authoritative dispatch.yaml. Fork and config edits update
+    # the dispatch.yaml stored alongside the archive without rewriting the
+    # archive's embedded copy, so the extracted one can be stale. A 204 means
+    # there's no metadata file (legacy agent) — keep the embedded copy.
+    config_url = build_namespaced_url(f"/agents/{agent_name}/source/config", namespace)
+    try:
+        config_resp = requests.get(config_url, headers=get_auth_headers(), timeout=30)
+        config_resp.raise_for_status()
+    except requests.exceptions.RequestException as exc:
+        logger.warning(
+            f"Could not fetch the current dispatch.yaml ({exc}); the cloned "
+            "copy may be out of date."
+        )
+    else:
+        if config_resp.status_code != 204 and config_resp.content:
+            (dest_dir / "dispatch.yaml").write_bytes(config_resp.content)
+            logger.debug("Overlaid current dispatch.yaml onto the clone.")
+
+    logger.success(f"Cloned agent '{agent_name}' into {dest_dir}")
 
 
 @agent_app.command("unregister")
