@@ -1,6 +1,6 @@
 [project]
 name = "dispatch-cli"
-version = "0.10.0"
+version = "0.11.1"
 description = ""
 authors = [
     {name = "Diamond Bishop", email = "diamond.bishop@datadoghq.com"},

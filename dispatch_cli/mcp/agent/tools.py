@@ -6,7 +6,7 @@ import re
 import sys
 from typing import Any
 
-from dispatch_agents.invocation import InvocationStatus
+from dispatch_agents.models import InvocationStatus
 
 from mcp.server.lowlevel import Server
 from mcp.types import TASK_REQUIRED, CallToolResult, TextContent, Tool

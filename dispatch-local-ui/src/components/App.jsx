@@ -1,4 +1,6 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
+import { HashRouter, Routes, Route, Navigate } from 'react-router-dom';
+import { Toaster } from 'sonner';
 import { LocalSidebar } from './LocalSidebar';
 import { LocalHeader } from './LocalHeader';
 import AgentListPage from './AgentListPage';
@@ -8,12 +10,6 @@ import TopicDetailsPage from './TopicDetailsPage';
 import LLMConfigPage from './LLMConfigPage';
 
 const App = () => {
-  // Navigation state
-  const [currentView, setCurrentView] = useState('agent-list'); // 'agent-list' | 'agent-details' | 'topics-list' | 'topic-details' | 'llm-config'
-  const [selectedAgent, setSelectedAgent] = useState(null);
-  const [selectedAgentId, setSelectedAgentId] = useState(null);
-  const [selectedTopic, setSelectedTopic] = useState(null);
-
   // Core app state
   const [loading, setLoading] = useState(true);
   const [agents, setAgents] = useState([]);
@@ -21,50 +17,18 @@ const App = () => {
   const [topics, setTopics] = useState([]);
   const [healthStatus, setHealthStatus] = useState('loading');
 
-  // Navigation functions
-  const showAgentList = () => {
-    setCurrentView('agent-list');
-    setSelectedAgent(null);
-    setSelectedAgentId(null);
-  };
-
-  const showAgentDetails = (agent) => {
-    setSelectedAgent(agent);
-    setSelectedAgentId(agent.name);
-    setSelectedTopic(null);
-    setCurrentView('agent-details');
-  };
-
-  const showTopicsList = () => {
-    setCurrentView('topics-list');
-    setSelectedAgent(null);
-    setSelectedAgentId(null);
-    setSelectedTopic(null);
-  };
-
-  const showTopicDetails = (topic) => {
-    setSelectedTopic(topic);
-    setSelectedAgent(null);
-    setSelectedAgentId(null);
-    setCurrentView('topic-details');
-  };
-
-  const showLLMConfig = () => {
-    setCurrentView('llm-config');
-    setSelectedAgent(null);
-    setSelectedAgentId(null);
-    setSelectedTopic(null);
-  };
+  // Persists output (messages + llmCalls) across navigation, keyed by agent name
+  const [agentOutputs, setAgentOutputs] = useState({});
+  const updateAgentOutput = useCallback((agentName, data) => {
+    setAgentOutputs(prev => ({ ...prev, [agentName]: data }));
+  }, []);
+  const getAgentOutput = useCallback((agentName) => agentOutputs[agentName] || null, [agentOutputs]);
 
   // Status helper methods
   const statusLevel = (status) => {
     const normalized = (status || '').toString().toLowerCase();
-    if (['healthy', 'deployed', 'active', 'running'].includes(normalized)) {
-      return 'good';
-    }
-    if (['building', 'pending', 'deploying'].includes(normalized)) {
-      return 'pending';
-    }
+    if (['healthy', 'deployed', 'active', 'running'].includes(normalized)) return 'good';
+    if (['building', 'pending', 'deploying'].includes(normalized)) return 'pending';
     return 'bad';
   };
 
@@ -79,14 +43,12 @@ const App = () => {
   const runningAgents = agents.filter(agent => statusLevel(agent.status) === 'good').length;
   const totalTopics = topics.length || 0;
 
-
   // API functions
   const checkHealth = async () => {
     try {
       const response = await fetch('/health');
       setHealthStatus(response.ok ? 'healthy' : 'error');
     } catch (error) {
-      console.error('Health check failed:', error);
       setHealthStatus('error');
     }
   };
@@ -94,12 +56,8 @@ const App = () => {
   const loadSystemStatus = async () => {
     try {
       const response = await fetch('/system/status');
-      if (response.ok) {
-        setSystemStatus(await response.json());
-      }
-    } catch (error) {
-      console.error('Failed to load system status:', error);
-    }
+      if (response.ok) setSystemStatus(await response.json());
+    } catch (error) {}
   };
 
   const loadAgents = async () => {
@@ -113,7 +71,6 @@ const App = () => {
         })));
       }
     } catch (error) {
-      console.error('Failed to load agents:', error);
       setAgents([]);
     }
   };
@@ -128,7 +85,6 @@ const App = () => {
         setTopics([]);
       }
     } catch (error) {
-      console.error('Failed to load topics:', error);
       setTopics([]);
     }
   };
@@ -139,51 +95,33 @@ const App = () => {
     setLoading(false);
   };
 
-  // Initialization
+  // Initialization + polling
   useEffect(() => {
-    const initializeApp = async () => {
-
-      // Load initial data
+    const init = async () => {
       await checkHealth();
       await loadSystemStatus();
       await loadAgents();
       await loadTopics();
       setLoading(false);
-
-
-      // Set up refresh interval
-      const interval = setInterval(() => {
-        checkHealth();
-        if (Math.random() < 0.6) {
-          loadSystemStatus();
-          loadTopics();
-        }
-        if (currentView === 'agent-list' && Math.random() < 0.8) {
-          loadAgents();
-        }
-      }, 5000);
-
-      return () => clearInterval(interval);
     };
 
-    initializeApp();
-  }, [currentView]);
+    init();
 
+    const interval = setInterval(() => {
+      checkHealth();
+      if (Math.random() < 0.6) {
+        loadSystemStatus();
+        loadTopics();
+      }
+      if (Math.random() < 0.8) {
+        loadAgents();
+      }
+    }, 5000);
 
-  // Application state object for passing to components
+    return () => clearInterval(interval);
+  }, []);
+
   const appState = {
-    // Navigation
-    currentView,
-    selectedAgent,
-    selectedAgentId,
-    selectedTopic,
-    showAgentList,
-    showAgentDetails,
-    showTopicsList,
-    showTopicDetails,
-    showLLMConfig,
-
-    // Core data
     loading,
     setLoading,
     agents,
@@ -191,79 +129,42 @@ const App = () => {
     systemStatus,
     topics,
     healthStatus,
-
-    // Computed values
     runningAgents,
     totalTopics,
-
-    // Utility functions
     statusLevel,
     statusBadgeClass,
     refreshAgents,
-
-    // API functions
     checkHealth,
     loadSystemStatus,
     loadAgents,
-    loadTopics
-  };
-
-  // Generate breadcrumbs based on current view
-  const getBreadcrumbs = () => {
-    if (currentView === 'agent-list') {
-      return [{ label: 'Agent Registry' }];
-    }
-    if (currentView === 'agent-details' && selectedAgent) {
-      return [
-        {
-          label: 'Agent Registry',
-          onClick: showAgentList
-        },
-        { label: selectedAgent.name }
-      ];
-    }
-    if (currentView === 'topics-list') {
-      return [{ label: 'Topics' }];
-    }
-    if (currentView === 'topic-details' && selectedTopic) {
-      return [
-        {
-          label: 'Topics',
-          onClick: showTopicsList
-        },
-        { label: typeof selectedTopic === 'string' ? selectedTopic : selectedTopic.name }
-      ];
-    }
-    if (currentView === 'llm-config') {
-      return [{ label: 'LLM Keys' }];
-    }
-    return [];
+    loadTopics,
+    getAgentOutput,
+    updateAgentOutput,
   };
 
   return (
-    <div className="h-screen flex relative app-background">
-      <LocalSidebar appState={appState} />
-      <div className="flex-1 flex flex-col overflow-hidden bg-white m-3 rounded-xl">
-        <LocalHeader breadcrumbs={getBreadcrumbs()} />
-        <div className="flex-1 overflow-auto bg-white p-6 relative">
-          {currentView === 'agent-list' && (
-            <AgentListPage appState={appState} />
-          )}
-          {currentView === 'agent-details' && (
-            <AgentDetailsPage appState={appState} />
-          )}
-          {currentView === 'topics-list' && (
-            <TopicsPage appState={appState} />
-          )}
-          {currentView === 'topic-details' && (
-            <TopicDetailsPage appState={appState} />
-          )}
-          {currentView === 'llm-config' && (
-            <LLMConfigPage />
-          )}
+    <HashRouter>
+      <div className="h-screen flex flex-col relative app-background">
+        <div className="h-1 bg-gradient-to-r from-yellow-400 via-yellow-500 to-amber-500 flex-shrink-0" />
+        <div className="flex flex-1 overflow-hidden">
+          <LocalSidebar />
+          <div className="flex-1 flex flex-col overflow-hidden relative" style={{ background: '#fcfdff' }}>
+            <LocalHeader />
+            <div className="flex-1 overflow-hidden bg-white relative flex flex-col">
+              <Routes>
+                <Route path="/" element={<Navigate to="/agents" replace />} />
+                <Route path="/agents" element={<AgentListPage appState={appState} />} />
+                <Route path="/agents/:agentName" element={<AgentDetailsPage appState={appState} />} />
+                <Route path="/topics" element={<TopicsPage appState={appState} />} />
+                <Route path="/topics/:topicName" element={<TopicDetailsPage appState={appState} />} />
+                <Route path="/settings/llm-keys" element={<LLMConfigPage />} />
+              </Routes>
+            </div>
+          </div>
         </div>
       </div>
-    </div>
+      <Toaster position="bottom-right" richColors />
+    </HashRouter>
   );
 };
 

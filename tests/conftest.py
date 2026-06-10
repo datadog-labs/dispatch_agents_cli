@@ -33,8 +33,20 @@ def init_logger():
 
 @pytest.fixture(autouse=True)
 def disable_version_check():
-    """Avoid network/version side effects in CLI command tests."""
-    with patch("dispatch_cli.main.check_and_notify_cli_update"):
+    """Avoid network/version side effects in CLI command tests.
+
+    Patches both the soft update notice and the hard minimum-version gate.
+    The gate reads requirements via ``get_sdk_version_requirements``; returning
+    None makes it fail open (no network, no block) everywhere it's called
+    (``get_auth_headers`` and the MCP client).
+    """
+    with (
+        patch("dispatch_cli.main.check_and_notify_cli_update"),
+        patch(
+            "dispatch_cli.version_check.get_sdk_version_requirements",
+            return_value=None,
+        ),
+    ):
         yield
 
 

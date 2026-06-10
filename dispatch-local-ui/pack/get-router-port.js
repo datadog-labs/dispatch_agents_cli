@@ -22,7 +22,7 @@ function getRouterPort() {
     }
   } catch (_) {}
   // 3. Fall back to the CLI router's default port
-  return 8080;
+  return 4000;
 }
 
 module.exports = getRouterPort;

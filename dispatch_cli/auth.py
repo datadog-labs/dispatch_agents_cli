@@ -12,6 +12,8 @@ from dispatch_cli.logger import get_logger
 from .auth_provider import MissingAuthenticationError, default_credential_provider
 from .auth_session import InvalidAuthSessionError, default_auth_session_store
 from .http_client import get_api_headers
+from .utils import DISPATCH_API_BASE
+from .version_check import enforce_minimum_cli_version
 
 
 def get_bearer_token() -> str:
@@ -24,7 +26,13 @@ def get_bearer_token() -> str:
 
 
 def get_auth_headers() -> dict[str, str]:
-    """Return API headers for protected CLI commands."""
+    """Return API headers for protected CLI commands.
+
+    Every authenticated backend call funnels through here, so it's also where
+    we hard-stop a CLI that's below the backend's minimum supported version
+    (bypassable with --force).
+    """
+    enforce_minimum_cli_version(DISPATCH_API_BASE)
     return get_api_headers(get_bearer_token())
 
 

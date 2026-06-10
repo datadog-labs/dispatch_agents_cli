@@ -1,17 +1,24 @@
 import React, { useState, useEffect } from "react";
-import { KeyRound, RefreshCw, Plus, Trash2, Check, X, Shield } from "lucide-react";
+import { toast } from "sonner";
+import { Cpu, KeyRound, RefreshCw, Trash2, Shield, MoreHorizontal, Pencil } from "lucide-react";
 import { Button } from "@ui/button";
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@ui/dialog";
+import {
+  DropdownMenu,
+  DropdownMenuTrigger,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+} from "@ui/dropdown-menu";
+import { PageHeader } from "./PageHeader";
 
 const LLMConfigPage = () => {
   const [providers, setProviders] = useState([]);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
-  const [error, setError] = useState(null);
-  const [successMessage, setSuccessMessage] = useState(null);
 
-  // Add key form state
-  const [showAddForm, setShowAddForm] = useState(false);
-  const [selectedProvider, setSelectedProvider] = useState("");
+  // modalProvider: null = closed, string = open for that provider
+  const [modalProvider, setModalProvider] = useState(null);
   const [apiKey, setApiKey] = useState("");
 
   const loadProviders = async () => {
@@ -21,66 +28,64 @@ const LLMConfigPage = () => {
         const data = await response.json();
         setProviders(data.providers || []);
       } else {
-        setError("Failed to load provider configuration");
+        toast.error("Failed to load provider configuration");
       }
     } catch (err) {
       console.error("Failed to load LLM config:", err);
-      setError("Failed to connect to router");
+      toast.error("Failed to connect to router");
     } finally {
       setLoading(false);
     }
   };
 
-  useEffect(() => {
-    loadProviders();
-  }, []);
+  useEffect(() => { loadProviders(); }, []);
 
   const handleRefresh = async () => {
     setLoading(true);
-    setError(null);
     await loadProviders();
   };
 
-  const handleAddKey = async (e) => {
+  const openModal = (providerName) => {
+    setModalProvider(providerName);
+    setApiKey("");
+  };
+
+  const closeModal = () => {
+    setModalProvider(null);
+    setApiKey("");
+  };
+
+  const handleSaveKey = async (e) => {
     e.preventDefault();
-    if (!selectedProvider || !apiKey.trim()) return;
+    if (!modalProvider || !apiKey.trim()) return;
 
     setSaving(true);
-    setError(null);
-    setSuccessMessage(null);
 
     try {
       const response = await fetch("/api/unstable/llm-config/local", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ provider: selectedProvider, api_key: apiKey.trim() }),
+        body: JSON.stringify({ provider: modalProvider, api_key: apiKey.trim() }),
       });
 
       if (response.ok) {
         const data = await response.json();
-        setSuccessMessage(data.message);
-        setShowAddForm(false);
-        setSelectedProvider("");
-        setApiKey("");
+        toast.success(data.message);
+        closeModal();
         await loadProviders();
       } else {
         const data = await response.json();
-        setError(data.detail || "Failed to save API key");
+        toast.error(data.detail || "Failed to save API key");
       }
     } catch (err) {
-      setError("Failed to connect to router");
+      toast.error("Failed to connect to router");
     } finally {
       setSaving(false);
     }
   };
 
   const handleRemoveKey = async (provider) => {
-    if (!confirm(`Remove API key for ${provider}? This will delete it from your Keychain.`)) {
-      return;
-    }
-
-    setError(null);
-    setSuccessMessage(null);
+    if (!confirm(`Remove API key for ${provider}? This will delete it from your Keychain.`)) return;
 
     try {
       const response = await fetch(`/api/unstable/llm-config/local/${provider}`, {
@@ -89,44 +94,24 @@ const LLMConfigPage = () => {
 
       if (response.ok) {
         const data = await response.json();
-        setSuccessMessage(data.message);
+        toast.success(data.message);
         await loadProviders();
       } else {
         const data = await response.json();
-        setError(data.detail || "Failed to remove API key");
+        toast.error(data.detail || "Failed to remove API key");
       }
     } catch (err) {
-      setError("Failed to connect to router");
+      toast.error("Failed to connect to router");
     }
   };
 
-  // Auto-clear messages after 4 seconds
-  useEffect(() => {
-    if (successMessage) {
-      const timer = setTimeout(() => setSuccessMessage(null), 4000);
-      return () => clearTimeout(timer);
-    }
-  }, [successMessage]);
-
-  useEffect(() => {
-    if (error) {
-      const timer = setTimeout(() => setError(null), 6000);
-      return () => clearTimeout(timer);
-    }
-  }, [error]);
-
-  const unconfiguredProviders = providers.filter((p) => !p.configured);
+  const modalProviderData = providers.find(p => p.provider === modalProvider);
+  const isUpdate = modalProviderData?.configured;
 
   if (loading && providers.length === 0) {
     return (
-      <div className="space-y-6">
-        <div className="flex items-center space-x-4">
-          <KeyRound className="h-8 w-8 text-[var(--color-brand-blue-600)]" />
-          <div>
-            <h1 className="text-3xl font-bold text-gray-900">LLM Keys</h1>
-            <p className="text-sm text-gray-500 mt-1">Manage API keys for local LLM providers</p>
-          </div>
-        </div>
+      <div className="h-full overflow-y-auto pt-3 px-6 pb-6 space-y-6">
+        <PageHeader title="LLM Keys" description="Manage API keys for local LLM providers" icon={Cpu} namespace="local" />
         <div className="bg-white rounded-lg border border-[var(--color-warm-gray-200)] p-8">
           <div className="flex items-center justify-center">
             <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-500"></div>
@@ -138,42 +123,18 @@ const LLMConfigPage = () => {
   }
 
   return (
-    <div className="space-y-6">
-      {/* Page Header */}
-      <div className="flex items-center justify-between">
-        <div className="flex items-center space-x-4">
-          <KeyRound className="h-8 w-8 text-[var(--color-brand-blue-600)]" />
-          <div>
-            <h1 className="text-3xl font-bold text-gray-900">LLM Keys</h1>
-            <p className="text-sm text-gray-500 mt-1">Manage API keys for local LLM providers</p>
-          </div>
-        </div>
-        <div className="flex items-center gap-2">
-          {unconfiguredProviders.length > 0 && (
-            <Button
-              onClick={() => {
-                setShowAddForm(true);
-                if (unconfiguredProviders.length > 0) {
-                  setSelectedProvider(unconfiguredProviders[0].provider);
-                }
-              }}
-              className="flex items-center gap-2"
-            >
-              <Plus className="w-4 h-4" />
-              Add Key
-            </Button>
-          )}
-          <Button
-            onClick={handleRefresh}
-            disabled={loading}
-            variant="outline"
-            className="flex items-center gap-2"
-          >
+    <div className="h-full overflow-y-auto pt-3 px-6 pb-6 space-y-6">
+      <PageHeader
+        title="LLM Keys"
+        description="Manage API keys for calling LLMs from local agents"
+        icon={Cpu}
+        actions={
+          <Button onClick={handleRefresh} disabled={loading} variant="outline" className="flex items-center gap-2">
             <RefreshCw className={`w-4 h-4 ${loading ? "animate-spin" : ""}`} />
             Refresh
           </Button>
-        </div>
-      </div>
+        }
+      />
 
       {/* Info Banner */}
       <div className="flex items-start gap-3 p-4 bg-blue-50 border border-blue-200 rounded-lg">
@@ -184,76 +145,6 @@ const LLMConfigPage = () => {
           router.
         </div>
       </div>
-
-      {/* Status Messages */}
-      {successMessage && (
-        <div className="flex items-center gap-2 p-3 bg-green-50 border border-green-200 rounded-lg text-sm text-green-800">
-          <Check className="w-4 h-4 flex-shrink-0" />
-          {successMessage}
-        </div>
-      )}
-      {error && (
-        <div className="flex items-center gap-2 p-3 bg-red-50 border border-red-200 rounded-lg text-sm text-red-800">
-          <X className="w-4 h-4 flex-shrink-0" />
-          {error}
-        </div>
-      )}
-
-      {/* Add Key Form */}
-      {showAddForm && (
-        <div className="bg-white rounded-lg border border-[var(--color-warm-gray-200)] p-6">
-          <h3 className="text-sm font-semibold text-gray-900 mb-4">Add API Key</h3>
-          <form onSubmit={handleAddKey} className="flex items-end gap-4">
-            <div className="flex-shrink-0">
-              <label className="block text-xs font-medium text-gray-600 mb-1.5">Provider</label>
-              <select
-                value={selectedProvider}
-                onChange={(e) => setSelectedProvider(e.target.value)}
-                className="block w-40 rounded-md border border-gray-300 px-3 py-2 text-sm focus:border-blue-500 focus:ring-1 focus:ring-blue-500"
-              >
-                <option value="">Select...</option>
-                {providers.map((p) => (
-                  <option key={p.provider} value={p.provider}>
-                    {p.provider.charAt(0).toUpperCase() + p.provider.slice(1)}
-                    {p.configured ? " (update)" : ""}
-                  </option>
-                ))}
-              </select>
-            </div>
-            <div className="flex-1">
-              <label className="block text-xs font-medium text-gray-600 mb-1.5">API Key</label>
-              <input
-                type="password"
-                value={apiKey}
-                onChange={(e) => setApiKey(e.target.value)}
-                placeholder={
-                  selectedProvider
-                    ? `Enter ${selectedProvider} API key...`
-                    : "Select a provider first"
-                }
-                className="block w-full rounded-md border border-gray-300 px-3 py-2 text-sm focus:border-blue-500 focus:ring-1 focus:ring-blue-500"
-                disabled={!selectedProvider}
-              />
-            </div>
-            <div className="flex gap-2 flex-shrink-0">
-              <Button type="submit" disabled={!selectedProvider || !apiKey.trim() || saving}>
-                {saving ? "Saving..." : "Save"}
-              </Button>
-              <Button
-                type="button"
-                variant="outline"
-                onClick={() => {
-                  setShowAddForm(false);
-                  setSelectedProvider("");
-                  setApiKey("");
-                }}
-              >
-                Cancel
-              </Button>
-            </div>
-          </form>
-        </div>
-      )}
 
       {/* Providers Table */}
       <div className="bg-white rounded-lg border border-[var(--color-warm-gray-200)] overflow-hidden">
@@ -307,7 +198,7 @@ const LLMConfigPage = () => {
                 </td>
                 <td className="px-6 py-4 whitespace-nowrap">
                   <span className="text-sm text-gray-500">
-                    {provider.storage_type || (provider.configured ? "unknown" : "\u2014")}
+                    {provider.storage_type || (provider.configured ? "unknown" : "—")}
                   </span>
                 </td>
                 <td className="px-6 py-4 whitespace-nowrap">
@@ -316,33 +207,84 @@ const LLMConfigPage = () => {
                   </code>
                 </td>
                 <td className="px-6 py-4 whitespace-nowrap text-right">
-                  <div className="flex items-center justify-end gap-2">
+                  {provider.configured ? (
+                    <DropdownMenu>
+                      <DropdownMenuTrigger asChild>
+                        <button className="p-1 rounded hover:bg-gray-100 text-gray-400 hover:text-gray-600 transition-colors">
+                          <MoreHorizontal className="w-4 h-4" />
+                        </button>
+                      </DropdownMenuTrigger>
+                      <DropdownMenuContent align="end">
+                        <DropdownMenuItem onClick={() => openModal(provider.provider)}>
+                          <Pencil className="w-3.5 h-3.5 mr-2" />
+                          Update key
+                        </DropdownMenuItem>
+                        <DropdownMenuSeparator />
+                        <DropdownMenuItem
+                          onClick={() => handleRemoveKey(provider.provider)}
+                          className="text-red-600 focus:text-red-600"
+                        >
+                          <Trash2 className="w-3.5 h-3.5 mr-2" />
+                          Remove key
+                        </DropdownMenuItem>
+                      </DropdownMenuContent>
+                    </DropdownMenu>
+                  ) : (
                     <button
-                      onClick={() => {
-                        setShowAddForm(true);
-                        setSelectedProvider(provider.provider);
-                        setApiKey("");
-                      }}
+                      onClick={() => openModal(provider.provider)}
                       className="text-xs text-blue-600 hover:text-blue-800 font-medium"
                     >
-                      {provider.configured ? "Update" : "Add"}
+                      Set
                     </button>
-                    {provider.configured && (
-                      <button
-                        onClick={() => handleRemoveKey(provider.provider)}
-                        className="text-xs text-red-500 hover:text-red-700 font-medium flex items-center gap-1"
-                      >
-                        <Trash2 className="w-3 h-3" />
-                        Remove
-                      </button>
-                    )}
-                  </div>
+                  )}
                 </td>
               </tr>
             ))}
           </tbody>
         </table>
       </div>
+
+      {/* Set / Update key modal */}
+      <Dialog open={!!modalProvider} onOpenChange={(open) => { if (!open) closeModal(); }}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>
+              {isUpdate ? "Update API Key" : "Set API Key"} &mdash;{" "}
+              <span className="font-mono text-[var(--color-steel-blue)]">
+                {modalProvider?.charAt(0).toUpperCase()}{modalProvider?.slice(1)}
+              </span>
+            </DialogTitle>
+          </DialogHeader>
+          <form onSubmit={handleSaveKey} className="space-y-4 pt-1">
+            <div>
+              <label className="block text-xs font-medium text-gray-600 mb-1.5">
+                API Key
+              </label>
+              <input
+                type="password"
+                value={apiKey}
+                onChange={(e) => setApiKey(e.target.value)}
+                placeholder={`Enter ${modalProvider} API key...`}
+                className="block w-full rounded-md border border-gray-300 px-3 py-2 text-sm focus:border-blue-500 focus:ring-1 focus:ring-blue-500"
+                autoFocus
+              />
+              {modalProviderData?.env_var && (
+                <p className="mt-1.5 text-xs text-gray-400">
+                  Stored as <code className="bg-gray-100 px-1 py-0.5 rounded">{modalProviderData.env_var}</code>
+                </p>
+              )}
+            </div>
+            <div className="flex justify-end gap-2">
+              <Button type="button" variant="outline" onClick={closeModal}>
+                Cancel
+              </Button>
+              <Button type="submit" disabled={!apiKey.trim() || saving}>
+                {saving ? "Saving…" : "Save"}
+              </Button>
+            </div>
+          </form>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 };

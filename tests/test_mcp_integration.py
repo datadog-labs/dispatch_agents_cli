@@ -2,7 +2,7 @@
 
 NOTE: These tests directly invoke start_local_agent_dev with no mocks, measuring
 real performance. However, they require a working router subprocess which may not
-work in all test environments (e.g., if uvicorn can't bind to port 8080).
+work in all test environments (e.g., if uvicorn can't bind to port 4000).
 
 To manually validate performance improvements:
 1. Stop the router: dispatch router stop
@@ -129,7 +129,7 @@ class TestStartLocalAgentDevIntegration:
 
             # Verify router is stopped
             router_check = subprocess.run(
-                ["lsof", "-i", ":8080"],
+                ["lsof", "-i", ":4000"],
                 capture_output=True,
             )
             router_stopped = router_check.returncode != 0
@@ -160,7 +160,7 @@ class TestStartLocalAgentDevIntegration:
 
             # Verify router and agent are running
             router_check = subprocess.run(
-                ["lsof", "-i", ":8080"],
+                ["lsof", "-i", ":4000"],
                 capture_output=True,
             )
             router_running = router_check.returncode == 0

@@ -216,4 +216,10 @@ h3 {
 .markdown-content td { border: 1px solid #d1d5db; padding: 0.25rem 0.5rem; }
 .markdown-content hr { margin: 0.75rem 0; border-color: #d1d5db; }
 
+/* Polyfill: -bottom-0.25 is a Tailwind v4 micro-spacing value not in v3's default scale.
+   HeaderLogo uses it to position the BETA pill just below the logo image. */
+.-bottom-0\.25 {
+  bottom: -0.0625rem;
+}
+
 /* Remove manual icon initialization styles */

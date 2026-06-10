@@ -9,7 +9,7 @@ from typing import Any
 
 import aiohttp
 import httpx
-from dispatch_agents import FeedbackSentiment, FeedbackType
+from dispatch_agents._internal.models import FeedbackSentiment, FeedbackType
 from pydantic import BaseModel, Field
 
 from dispatch_cli.utils import (
@@ -77,15 +77,15 @@ class DeployAgentRequest(BaseModel):
     """Request payload for deploying an agent."""
 
     agent_directory: str = Field(description="Path to the agent directory")
-    overwrite: bool = Field(
+    skip_checks: bool = Field(
         default=False,
         description=(
-            "Set true to overwrite an existing agent that was created by a "
-            "different user. You can always overwrite your own agents without "
-            "this flag. When false (default), deploying over an agent owned by "
-            "someone else is blocked so a downloaded/cloned agent isn't "
-            "clobbered by accident. To deploy as a NEW agent instead, change "
-            "`agent_name` in the directory's dispatch.yaml before deploying."
+            "DISCOURAGED. By default the deploy runs the normal pre-deploy "
+            "validation (unconfigured secrets, unsupported base_image, SDK "
+            "and schema compatibility) and fails if a check fails — fix the "
+            "reported issue rather than skipping. Set true only to bypass "
+            "those validations (e.g. a known-safe deploy blocked by a check "
+            "you can't address right now). Does NOT drop egress selectors."
         ),
     )
 
@@ -526,7 +526,7 @@ class StartLocalAgentDevResponse(BaseModel):
     status: str = Field(description="Dev mode status")
     message: str = Field(description="Status message with instructions")
     router_ui_url: str = Field(
-        default="http://localhost:8080", description="Router UI URL"
+        default="http://localhost:4000", description="Router UI URL"
     )
     startup_logs: list[str] = Field(
         default_factory=list,
@@ -683,6 +683,14 @@ async def cleanup_all_agent_processes(base_dir: str | None = None) -> int:
 OPERATOR_INSTRUCTIONS = """
 Dispatch Agents Operator - MCP Server for managing AI agents on the Dispatch platform.
 
+## Creating a New Agent
+
+Always start with the `create_agent` MCP tool before writing any code. It scaffolds
+the agent directory, dispatch.yaml, agent.py, and the .dispatch assets that
+deploy_agent requires. Skipping it causes deploy to fail because the required
+.dispatch assets are missing.
+
+
 ## Agent Configuration (dispatch.yaml)
 
 When creating or modifying agents, the `dispatch.yaml` file in the agent directory controls
@@ -758,7 +766,7 @@ async def my_function(payload: MyInput) -> MyOutput:
 Available environment variables in your agent code:
 - `DISPATCH_AGENT_NAME`: The agent's name (from dispatch.yaml or pyproject.toml)
 - `DISPATCH_NAMESPACE`: Namespace for API calls
-- `BACKEND_URL`: URL of the backend API (auto-configured)
+- `DISPATCH_BACKEND_URL`: URL of the backend API (auto-configured)
 - `DISPATCH_API_KEY`: API key for authentication (auto-configured)
 
 Example usage:
@@ -810,7 +818,7 @@ response = await llm.inference(
   Namespaces can override with their own keys if needed.
 - Use `dispatch llm setup` to configure providers, or the web UI at /manage/llm-providers.
 - Each agent can have a **monthly budget** to cap LLM spend.
-- Set `DISPATCH_LLM_INSTRUMENT=false` to bypass the gateway and use provider SDKs directly.
+- Set `llm_instrument: false` in dispatch.yaml to bypass the gateway and use provider SDKs directly.
 
 ## Memory API
 
@@ -968,7 +976,10 @@ def create_operator_mcp(client: OperatorBackendClient, config: MCPConfig) -> Fas
 
     @mcp.tool()
     async def create_agent(request: CreateAgentRequest) -> CreateAgentResponse:
-        """Initialize a new agent directory with scaffold code.
+        """Start here when building a new agent. Scaffolds the agent directory,
+        dispatch.yaml, agent.py template, and the .dispatch assets that deploy_agent
+        requires. Run this before writing any code — skipping it causes deploy to fail
+        because the required .dispatch assets are missing.
 
         Args:
             request: CreateAgentRequest with parent_directory, agent_name, description, and namespace
@@ -1018,23 +1029,12 @@ namespace: {ns}
     ) -> DeployAgentResponse:
         """Deploy an agent from directory (auto-discovers namespace from dispatch.yaml).
 
-        If an agent with the same name already exists and was created by a
-        different user, the deploy is blocked unless `overwrite=true` — this
-        stops a downloaded/cloned agent from accidentally overwriting someone
-        else's original. You can always overwrite your own agents. Two ways to
-        proceed when blocked:
-          - To OVERWRITE another user's existing agent, set `overwrite=true`.
-          - To deploy as a NEW, separate agent, change `agent_name` in the
-            directory's dispatch.yaml first, then deploy.
-
         Args:
-            request: DeployAgentRequest with agent_directory and optional overwrite
+            request: DeployAgentRequest with agent_directory and optional skip_checks
             ctx: MCP context for logging
 
         Returns:
             DeployAgentResponse with agent_name, status, and deployment message.
-            status is "blocked" (and no job_id) when the agent is owned by
-            another user and overwrite was not set.
         """
         # Convert to absolute path for consistency
         abs_agent_dir = os.path.abspath(request.agent_directory)
@@ -1045,15 +1045,14 @@ namespace: {ns}
 
         await ctx.info(f"Starting deployment of agent '{agent_name}'")
 
-        # Run dispatch agent deploy with --force --no-wait so it returns after
-        # uploading the image without blocking on the full deployment. --force
-        # suppresses typer prompts (stdin is DEVNULL) and skips pre-deploy
-        # validation. Ownership is enforced server-side: --overwrite is only
-        # passed through when the caller explicitly sets overwrite=true, so a
-        # deploy over another user's agent is blocked unless requested.
-        deploy_args = ["dispatch", "agent", "deploy", "--force", "--no-wait"]
-        if request.overwrite:
-            deploy_args.append("--overwrite")
+        # Run dispatch agent deploy with --no-wait so it returns after
+        # uploading the image without blocking on the full deployment. By
+        # default we run the normal pre-deploy validation (no --skip-checks):
+        # the CLI's only interactive prompt auto-proceeds in a non-interactive
+        # session, while hard validation failures correctly surface as errors.
+        deploy_args = ["dispatch", "agent", "deploy", "--no-wait"]
+        if request.skip_checks:
+            deploy_args.append("--skip-checks")
         process = await asyncio.create_subprocess_exec(
             *deploy_args,
             cwd=abs_agent_dir,
@@ -1086,23 +1085,6 @@ namespace: {ns}
 
         if process.returncode != 0:
             error_msg = "\n".join(stderr_lines) or "\n".join(stdout_lines)
-            # The ownership gate (CLI preflight or backend 403) surfaces a
-            # message naming the owner and telling the user to pass --overwrite.
-            # Return actionable guidance instead of a hard error so the caller
-            # can re-run with overwrite=true or rename the agent.
-            if "--overwrite" in error_msg:
-                check_ns = agent_config.get("namespace") or config.namespace
-                return DeployAgentResponse(
-                    agent_name=agent_name,
-                    status="blocked",
-                    message=(
-                        f"{error_msg}\n\nRe-run with overwrite=true to overwrite "
-                        "it, or change `agent_name` in the directory's "
-                        "dispatch.yaml to deploy it as a new agent."
-                    ),
-                    job_id=None,
-                    namespace=str(check_ns) if check_ns else None,
-                )
             await ctx.error(f"Deployment failed: {error_msg}")
             raise RuntimeError(f"Failed to deploy agent: {error_msg}")
 
@@ -1145,8 +1127,7 @@ namespace: {ns}
 
         A namespace is required (pass `namespace` or rely on the configured
         default). After downloading, to deploy this source:
-          - as the SAME agent (overwriting it), call deploy_agent — add
-            overwrite=true if it was created by a different user;
+          - as the SAME agent (overwriting it), call deploy_agent directly;
           - as a NEW agent, change `agent_name` in the downloaded
             dispatch.yaml first, then call deploy_agent.
 
@@ -1198,10 +1179,9 @@ namespace: {ns}
             agent_name=request.agent_name,
             destination_directory=dest,
             message=(
-                f"Downloaded '{request.agent_name}' into {dest}. To deploy as a "
-                "new agent, change agent_name in dispatch.yaml first; to "
-                "overwrite an agent created by another user, deploy with "
-                "overwrite=true."
+                f"Downloaded '{request.agent_name}' into {dest}. To deploy as "
+                "the same agent, run deploy_agent. To deploy as a NEW separate "
+                "agent instead, change agent_name in dispatch.yaml first."
             ),
         )
 
@@ -1612,8 +1592,9 @@ namespace: {ns}
             # Router is not running - start it automatically
             await ctx.info("Router is not running, starting it now...")
 
-            # Start the router
-            await asyncio.create_subprocess_exec(
+            # `dispatch router start` already waits for the background router
+            # service to become healthy and reports startup errors.
+            process = await asyncio.create_subprocess_exec(
                 "dispatch",
                 "router",
                 "start",
@@ -1622,26 +1603,15 @@ namespace: {ns}
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
+            stdout, stderr = await process.communicate()
 
-            # Wait for router with fast retries - router will respond when ready
-            router_ready = False
-            async with httpx.AsyncClient() as http_client:
-                for attempt in range(20):  # 20 attempts * 0.1s = 2s max
-                    try:
-                        response = await http_client.get(
-                            f"{LOCAL_ROUTER_URL}:{router_port}/health", timeout=0.5
-                        )
-                        response.raise_for_status()
-                        router_ready = True
-                        await ctx.info("Router started successfully")
-                        break
-                    except Exception:
-                        if attempt < 19:
-                            await asyncio.sleep(0.1)
+            if process.returncode != 0:
+                output = stderr.decode().strip() or stdout.decode().strip()
+                message = f"Router failed to start: {output}"
+                await ctx.error(message)
+                raise RuntimeError(message)
 
-            if not router_ready:
-                await ctx.error("Router failed to start within 2 seconds")
-                raise RuntimeError("Router failed to start within 2 seconds")
+            await ctx.info("Router started successfully")
 
         # Clean up any existing agent dev processes for this agent
         # Use PID file to track running processes for this specific agent

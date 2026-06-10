@@ -19,7 +19,7 @@ import os
 from typing import Any
 
 import httpx
-from dispatch_agents.llm import LLMFunctionCall, LLMToolCall
+from dispatch_agents.models import LLMFunctionCall, LLMToolCall
 
 from dispatch_cli.logger import get_logger
 from dispatch_cli.router.models import LLMProviderResult

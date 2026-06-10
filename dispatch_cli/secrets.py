@@ -417,7 +417,7 @@ def get_secret_sources(
         # 1. Environment variable (highest precedence)
         if name in os.environ:
             result["source"] = "env"
-            result["storage_type"] = "environment variable"
+            result["storage_type"] = "Env variable"
             result["configured"] = True
             results.append(result)
             continue
@@ -438,17 +438,15 @@ def get_secret_sources(
                 keychain_value = _get_from_keychain(keychain_account)
                 if keychain_value:
                     result["source"] = "keychain"
-                    result["storage_type"] = f"system secure store ({keychain_account})"
+                    result["storage_type"] = "macOS Keychain"
                     result["configured"] = True
                 else:
                     result["source"] = "keychain"
-                    result["storage_type"] = (
-                        f"secure-store entry missing ({keychain_account})"
-                    )
+                    result["storage_type"] = "Keychain Ref (⚠️ missing)"
                     result["configured"] = False
             elif "value" in secret_config:
                 result["source"] = "raw"
-                result["storage_type"] = "raw text in secrets.yaml (⚠️ insecure)"
+                result["storage_type"] = "Raw secrets.yaml (⚠️ insecure)"
                 result["configured"] = True
 
         results.append(result)

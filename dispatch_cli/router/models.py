@@ -6,7 +6,7 @@ providing static type checking without runtime overhead via TypedDicts.
 
 from typing import TypedDict
 
-from dispatch_agents import LLMToolCall
+from dispatch_agents.models import LLMToolCall
 
 
 class LLMProviderResult(TypedDict, total=False):

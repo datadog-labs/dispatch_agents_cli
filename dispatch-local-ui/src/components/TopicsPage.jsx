@@ -1,12 +1,14 @@
-import React, { useState, useEffect } from "react";
-import { Radio, RefreshCw } from "lucide-react";
+import React, { useState } from "react";
+import { useNavigate } from "react-router-dom";
+import { Radio, RefreshCw, Play } from "lucide-react";
 import { Button } from "@ui/button";
+import { PageHeader } from "./PageHeader";
 
 const TopicsPage = ({ appState }) => {
+  const navigate = useNavigate();
   const {
     topics,
     agents,
-    showTopicDetails,
     loadTopics,
     loading: appLoading
   } = appState;
@@ -38,12 +40,8 @@ const TopicsPage = ({ appState }) => {
 
   // Handle topic click
   const handleTopicClick = (topic) => {
-    const topicName = typeof topic === 'string' ? topic : topic.name; // Changed from topic.topic to topic.name
-    const topicData = {
-      name: topicName,
-      subscribers: getAgentCountForTopic(topicName)
-    };
-    showTopicDetails(topicData);
+    const topicName = typeof topic === 'string' ? topic : topic.name;
+    navigate('/topics/' + encodeURIComponent(topicName));
   };
 
   // Format topics data
@@ -52,26 +50,13 @@ const TopicsPage = ({ appState }) => {
     return {
       name: topicName,
       subscribers: getAgentCountForTopic(topicName),
-      runs: 0, // We don't have runs data in local mode
-      lastTriggered: 'Unknown'
     };
   }) : [];
 
   if (showLoading) {
     return (
-      <div className="space-y-6">
-        {/* Page Header */}
-        <div className="flex items-center justify-between">
-          <div className="flex items-center space-x-4">
-            <Radio className="h-8 w-8 text-[var(--color-brand-blue-600)]" />
-            <div>
-              <h1 className="text-3xl font-bold text-gray-900">Topics</h1>
-              <p className="text-sm text-gray-500 mt-1">
-                Registered topics for local agents
-              </p>
-            </div>
-          </div>
-        </div>
+      <div className="h-full overflow-y-auto pt-3 px-6 pb-6 space-y-6">
+        <PageHeader title="Topics" description="Sent test events to trigger local agents" icon={Radio} chips={[{ label: 'LOCAL' }]} />
 
         <div className="bg-white rounded-lg border border-[var(--color-warm-gray-200)] p-8">
           <div className="flex items-center justify-center">
@@ -84,28 +69,19 @@ const TopicsPage = ({ appState }) => {
   }
 
   return (
-    <div className="space-y-6">
-      {/* Page Header */}
-      <div className="flex items-center justify-between">
-        <div className="flex items-center space-x-4">
-          <Radio className="h-8 w-8 text-[var(--color-brand-blue-600)]" />
-          <div>
-            <h1 className="text-3xl font-bold text-gray-900">Topics</h1>
-            <p className="text-sm text-gray-500 mt-1">
-              Registered topics that agents can subscribe to
-            </p>
-          </div>
-        </div>
-        <Button
-          onClick={handleRefresh}
-          disabled={loading}
-          variant="outline"
-          className="flex items-center gap-2"
-        >
-          <RefreshCw className={`w-4 h-4 ${loading ? 'animate-spin' : ''}`} />
-          Refresh
-        </Button>
-      </div>
+    <div className="h-full overflow-y-auto pt-3 px-6 pb-6 space-y-6">
+      <PageHeader
+        title="Topics"
+        description="Registered topics that agents can subscribe to"
+        icon={Radio}
+        namespace="Local"
+        actions={
+          <Button onClick={handleRefresh} disabled={loading} variant="outline" className="flex items-center gap-2">
+            <RefreshCw className={`w-4 h-4 ${loading ? 'animate-spin' : ''}`} />
+            Refresh
+          </Button>
+        }
+      />
 
       {/* Topics Table */}
       {topicsData.length === 0 ? (
@@ -129,12 +105,7 @@ const TopicsPage = ({ appState }) => {
                 <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
                   Subscribers
                 </th>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                  Runs
-                </th>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                  Last Triggered
-                </th>
+                <th className="px-6 py-3" />
               </tr>
             </thead>
             <tbody className="bg-white divide-y divide-gray-200">
@@ -146,18 +117,23 @@ const TopicsPage = ({ appState }) => {
                 >
                   <td className="px-6 py-4 whitespace-nowrap">
                     <div className="flex items-center">
-                      <Radio className="w-4 h-4 text-[var(--color-brand-blue-500)] mr-3" />
+                      <Radio className="w-4 h-4 text-purple-600 mr-3" />
                       <div className="text-sm font-medium text-gray-900">{topic.name}</div>
                     </div>
                   </td>
                   <td className="px-6 py-4 whitespace-nowrap">
                     <div className="text-sm text-gray-900">{topic.subscribers}</div>
                   </td>
-                  <td className="px-6 py-4 whitespace-nowrap">
-                    <div className="text-sm text-gray-500">{topic.runs}</div>
-                  </td>
-                  <td className="px-6 py-4 whitespace-nowrap">
-                    <div className="text-sm text-gray-500">{topic.lastTriggered}</div>
+                  <td className="px-6 py-4 whitespace-nowrap text-right">
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={(e) => { e.stopPropagation(); handleTopicClick(topic); }}
+                      className="gap-1.5 border-blue-500 text-blue-600 hover:bg-blue-50 hover:text-blue-700"
+                    >
+                      <Play className="w-3.5 h-3.5" />
+                      Test
+                    </Button>
                   </td>
                 </tr>
               ))}
