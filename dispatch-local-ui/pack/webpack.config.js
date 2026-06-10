@@ -45,6 +45,10 @@ module.exports = {
         }
       },
       {
+        test: /\.(png|jpg|jpeg|svg|gif|webp)$/i,
+        type: 'asset/resource',
+      },
+      {
         test: /\.css$/,
         use: [
           isProduction ? MiniCssExtractPlugin.loader : 'style-loader',

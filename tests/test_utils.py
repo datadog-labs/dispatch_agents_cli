@@ -5,6 +5,8 @@ import tempfile
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+
 from dispatch_cli.utils import (
     DEFAULT_BASE_IMAGE,
     DISPATCH_LISTENER_FILE,
@@ -156,8 +158,8 @@ port = 3000
 
             config = read_project_config(tmpdir)
 
-        # Only keys present in pyproject.toml and in DEFAULT_CONFIG are returned
-        # "port" is not in DEFAULT_CONFIG so it's filtered out (shown in warning)
+        # Only keys present in pyproject.toml and in the DispatchConfig schema are
+        # returned; "port" is not a model field so it's filtered out (warned).
         assert config == {"base_image": "python:3.11-slim"}
 
 
@@ -269,3 +271,30 @@ class TestPromptForMissingConfig:
             # Should prompt for missing system_packages only
             assert updated_config["system_packages"] == []
             assert mock_prompt.call_count == 1
+
+
+class TestDispatchYamlValidation:
+    """dispatch.yaml validity is owned by the SDK DispatchConfig model."""
+
+    def test_accepts_llm_instrument_and_log_level(self):
+        from dispatch_cli.utils import read_dispatch_yaml
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with open(os.path.join(tmpdir, "dispatch.yaml"), "w") as f:
+                f.write("llm_instrument: false\nlog_level: DEBUG\n")
+
+            data = read_dispatch_yaml(tmpdir)
+            assert data["llm_instrument"] is False
+            assert data["log_level"] == "DEBUG"
+
+    def test_rejects_unknown_key(self):
+        import typer
+
+        from dispatch_cli.utils import read_dispatch_yaml
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with open(os.path.join(tmpdir, "dispatch.yaml"), "w") as f:
+                f.write("not_a_real_key: 1\n")
+
+            with pytest.raises(typer.BadParameter, match="not_a_real_key"):
+                read_dispatch_yaml(tmpdir)

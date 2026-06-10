@@ -1,35 +1,9 @@
 import React from "react";
-import { Badge } from "@ui/badge";
-import { Waypoints } from "lucide-react";
+import { Button } from "@ui/button";
+import { Waypoints, Play } from "lucide-react";
+import { StatusBadge } from './StatusBadge';
 
 export function LocalAgentTable({ agents, onAgentSelect, isLoading = false }) {
-
-  const formatLastRun = (lastRun) => {
-    if (!lastRun || lastRun === 'never') return 'Never';
-    return lastRun;
-  };
-
-  const getStatusBadgeVariant = (status) => {
-    const normalized = (status || '').toString().toLowerCase();
-    if (['healthy', 'deployed', 'active', 'running'].includes(normalized)) {
-      return 'success';
-    }
-    if (['building', 'pending', 'deploying'].includes(normalized)) {
-      return 'secondary';
-    }
-    return 'secondary';
-  };
-
-  const getStatusColor = (status) => {
-    const normalized = (status || '').toString().toLowerCase();
-    if (['healthy', 'deployed', 'active', 'running'].includes(normalized)) {
-      return 'bg-green-500';
-    }
-    if (['building', 'pending', 'deploying'].includes(normalized)) {
-      return 'bg-yellow-500';
-    }
-    return 'bg-red-500';
-  };
 
   if (isLoading) {
     return (
@@ -70,6 +44,7 @@ export function LocalAgentTable({ agents, onAgentSelect, isLoading = false }) {
             <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
               Status
             </th>
+            <th className="px-6 py-3" />
           </tr>
         </thead>
         <tbody className="bg-white divide-y divide-gray-200">
@@ -81,7 +56,7 @@ export function LocalAgentTable({ agents, onAgentSelect, isLoading = false }) {
             >
               <td className="px-6 py-4 whitespace-nowrap">
                 <div className="flex items-center">
-                  <Waypoints className="w-4 h-4 text-[var(--color-brand-blue-500)] mr-3" />
+                  <Waypoints className="w-4 h-4 text-teal-800 mr-3" />
                   <div className="text-sm font-medium text-gray-900">{agent.name}</div>
                 </div>
               </td>
@@ -89,12 +64,18 @@ export function LocalAgentTable({ agents, onAgentSelect, isLoading = false }) {
                 <div className="text-sm text-gray-500 font-mono">{agent.url || '-'}</div>
               </td>
               <td className="px-6 py-4 whitespace-nowrap">
-                <div className="flex items-center">
-                  <div className={`w-2 h-2 rounded-full mr-2 ${getStatusColor(agent.status)}`} />
-                  <Badge variant={getStatusBadgeVariant(agent.status)} className="text-xs">
-                    {agent.status || 'unknown'}
-                  </Badge>
-                </div>
+                <StatusBadge status={agent.status} />
+              </td>
+              <td className="px-6 py-4 whitespace-nowrap text-right">
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={(e) => { e.stopPropagation(); onAgentSelect(agent); }}
+                  className="gap-1.5 border-blue-500 text-blue-600 hover:bg-blue-50 hover:text-blue-700"
+                >
+                  <Play className="w-3.5 h-3.5" />
+                  Run
+                </Button>
               </td>
             </tr>
           ))}

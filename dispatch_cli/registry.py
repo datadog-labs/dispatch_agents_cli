@@ -9,7 +9,7 @@ from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 
-from dispatch_agents.models import Agent, AgentContainerStatus
+from dispatch_agents._internal.models import Agent, AgentContainerStatus
 
 REGISTRY_PATH = Path.home() / ".dispatch_agents" / "default" / "registry.db"
 REGISTRY_PATH.parent.mkdir(parents=True, exist_ok=True)

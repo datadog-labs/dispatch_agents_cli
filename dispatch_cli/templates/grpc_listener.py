@@ -105,7 +105,7 @@ yaml_path = os.path.join(root_path, "dispatch.yaml")
 os.environ.setdefault("DISPATCH_CONFIG_PATH", yaml_path)
 
 # Backend configuration and agent identity
-backend_base_url = os.getenv("BACKEND_URL", "http://dispatch.api:8000")
+backend_base_url = os.getenv("DISPATCH_BACKEND_URL", "http://dispatch.api:8000")
 backend_url = f"{backend_base_url}/api/unstable"
 
 # ── LLM Sidecar Proxy ──────────────────────────────────────────────────
@@ -119,20 +119,32 @@ def _start_llm_proxy(agent_config: dict) -> None:
     """Start the LLM sidecar proxy and configure env vars."""
     global _proxy_thread
 
-    if os.environ.get("DISPATCH_LLM_INSTRUMENT", "true").lower() == "false":
-        print(
-            "LLM instrumentation disabled (DISPATCH_LLM_INSTRUMENT=false)", flush=True
-        )
+    # The `llm_instrument` field in dispatch.yaml is the supported control.
+    from dispatch_agents.config import config as _config
+
+    instrument = _config.llm_instrument
+    if not instrument:
+        print("LLM instrumentation disabled (llm_instrument=false)", flush=True)
         return
 
     proxy_port = int(os.environ.get("DISPATCH_LLM_PROXY_PORT", "8780"))
     proxy_url = f"http://127.0.0.1:{proxy_port}"
 
+    # Capture original provider keys before overwriting — used as fallback
+    # credentials when the backend has no LLM provider configured.
+    from dispatch_agents._internal.proxy.server import FallbackKeys
+
+    fallback_keys: FallbackKeys = {}
+    if openai_key := os.environ.get("OPENAI_API_KEY"):
+        fallback_keys["OPENAI_API_KEY"] = openai_key
+    if anthropic_key := os.environ.get("ANTHROPIC_API_KEY"):
+        fallback_keys["ANTHROPIC_API_KEY"] = anthropic_key
+
     # Start proxy in a daemon thread (avoids macOS multiprocessing spawn issues)
     def _run_proxy():
-        from dispatch_agents.proxy.server import run_server
+        from dispatch_agents._internal.proxy.server import run_server
 
-        run_server(port=proxy_port)
+        run_server(port=proxy_port, fallback_keys=fallback_keys)
 
     _proxy_thread = threading.Thread(target=_run_proxy, daemon=True, name="llm-proxy")
     _proxy_thread.start()
@@ -163,20 +175,8 @@ def _start_llm_proxy(agent_config: dict) -> None:
     # The proxy forwards to the backend (/llm/inference) which handles
     # credentials, LLM routing, cost tracking, and telemetry.
     # We force-set these to ensure the proxy is used. Users who need direct
-    # provider access can set DISPATCH_LLM_INSTRUMENT=false.
+    # provider access can set `llm_instrument: false` in dispatch.yaml.
     os.environ["DISPATCH_LLM_PROXY_URL"] = proxy_url
-
-    # Save original API keys before overriding — the proxy uses these as
-    # fallback credentials when the backend has no LLM provider configured.
-    for var in [
-        "OPENAI_API_KEY",
-        "OPENAI_BASE_URL",
-        "ANTHROPIC_API_KEY",
-        "ANTHROPIC_BASE_URL",
-    ]:
-        original = os.environ.get(var)
-        if original:
-            os.environ[f"_DISPATCH_ORIGINAL_{var}"] = original
 
     for var, val in [
         ("OPENAI_BASE_URL", f"{proxy_url}/openai/v1"),
@@ -189,7 +189,7 @@ def _start_llm_proxy(agent_config: dict) -> None:
             print(
                 f"Info: routing {var} through Dispatch LLM proxy "
                 f"(original key saved for fallback). "
-                f"Set DISPATCH_LLM_INSTRUMENT=false to disable.",
+                f"Set `llm_instrument: false` in dispatch.yaml to disable.",
                 flush=True,
             )
         os.environ[var] = val
@@ -199,7 +199,7 @@ def _start_llm_proxy(agent_config: dict) -> None:
         os.environ.setdefault("DISPATCH_AGENT_NAME", AGENT_NAME)
 
     # Enable auto-instrumentation (patches httpx/requests for trace headers)
-    from dispatch_agents.instrument import auto_instrument
+    from dispatch_agents._internal.instrument import auto_instrument
 
     auto_instrument()
 
@@ -227,10 +227,13 @@ try:
         print(f"Successfully imported entrypoint: {entrypoint_file}", flush=True)
 
         # Import from dispatch_agents to verify registration
-        from dispatch_agents.events import REGISTERED_HANDLERS, TOPIC_HANDLERS
+        from dispatch_agents.handlers import (
+            _REGISTERED_HANDLERS,
+            _TOPIC_HANDLERS,
+        )
 
-        print(f"Registered handlers: {list(REGISTERED_HANDLERS.keys())}", flush=True)
-        print(f"Topic triggers: {list(TOPIC_HANDLERS.keys())}", flush=True)
+        print(f"Registered handlers: {list(_REGISTERED_HANDLERS.keys())}", flush=True)
+        print(f"Topic triggers: {list(_TOPIC_HANDLERS.keys())}", flush=True)
     else:
         print(f"Warning: Entrypoint file not found: {entrypoint_path}", flush=True)
         raise FileNotFoundError(f"Entrypoint file not found: {entrypoint_path}")
@@ -242,7 +245,7 @@ except Exception as e:
 
 async def main(port=50051):
     """Start the gRPC server for the agent."""
-    from dispatch_agents.grpc_server import serve
+    from dispatch_agents._internal.grpc_server import serve
 
     logger.info(f"Starting gRPC server for agent '{AGENT_NAME}'...")
 

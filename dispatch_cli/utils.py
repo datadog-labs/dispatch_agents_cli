@@ -1,21 +1,24 @@
 """Shared utility functions for dispatch CLI."""
 
+import ast
 import copy
 import os
 import re
 from collections.abc import Callable
 from typing import Any
 
+import requests
 import tomlkit
 import typer
 import yaml
-from dispatch_agents.config import ResourceConfig, VolumeConfig
+from dispatch_agents.models import DispatchConfig, ResourceConfig, VolumeConfig
+from pydantic import ValidationError
 from tomlkit.items import Item
 
 from dispatch_cli.logger import get_logger
 
 # URL constants for different contexts
-LOCAL_ROUTER_PORT = int(os.getenv("LOCAL_ROUTER_PORT", "8080"))
+LOCAL_ROUTER_PORT = int(os.getenv("LOCAL_ROUTER_PORT", "4000"))
 LOCAL_ROUTER_URL = "http://localhost"
 DISPATCH_API_BASE = os.getenv("DISPATCH_DEPLOY_URL", "https://dispatchagents.ai")
 DISPATCH_DEPLOY_URL = DISPATCH_API_BASE + "/api/unstable"
@@ -98,22 +101,6 @@ INTERACTIVE_CONFIG_OPTIONS: dict[str, dict] = {
     },
 }
 
-DEFAULT_CONFIG: dict[str, object | None] = {
-    "namespace": None,
-    "entrypoint": None,
-    "base_image": None,
-    "system_packages": None,
-    "local_dependencies": None,
-    "agent_name": None,
-    "env": None,  # plain env vars (like {"LOG_LEVEL": "debug"})
-    "vars": None,  # config variables accessible via dispatch_agents.config.vars (not injected as env vars)
-    "secrets": None,  # list of objects with name/secret_id for secrets manager paths (like [{"name": "OPENAI_API_KEY", "secret_id": "/shared/openai-api-key"}])
-    "volumes": None,  # list of volume objects (like [{"name": "data", "mountPath": "/data", "mode": "read_write_many"}])
-    "mcp_servers": None,  # list of MCP server configs (e.g., [{"server": "com.datadoghq.mcp"}])
-    "resources": None,  # resource limits (like {"cpu": 512, "memory": 1024})
-    "network": None,  # network egress restrictions (like {"egress": {"allow_domains": [{"match_name": "api.openai.com"}]}})
-}
-
 
 def _to_builtin(value):
     if isinstance(value, Item):
@@ -157,7 +144,9 @@ def read_project_config(
         return config
 
     dispatch_config = document.get("tool", {}).get("dispatch", {}) or {}
-    allowed_keys = set(DEFAULT_CONFIG.keys())
+    # Valid keys are owned by the SDK's DispatchConfig model — the single source
+    # of truth, so new config fields are accepted without a CLI-side list.
+    allowed_keys = set(DispatchConfig.model_fields)
     unsupported = set(dispatch_config.keys()) - allowed_keys
     if unsupported:
         logger = get_logger()
@@ -201,14 +190,16 @@ def read_dispatch_yaml(path: str) -> dict:
             f"{filename} must contain a mapping, found {type(data).__name__}"
         )
 
-    # Validate against allowed keys - error on unknown keys
-    allowed_keys = set(DEFAULT_CONFIG.keys())
-    unknown_keys = set(data.keys()) - allowed_keys
-    if unknown_keys:
-        raise typer.BadParameter(
-            f"Unknown keys in {filename}: {', '.join(sorted(unknown_keys))}. "
-            f"Allowed keys are: {', '.join(sorted(allowed_keys))}"
+    # Validate against the SDK schema (the single source of truth). DispatchConfig
+    # has extra="forbid", so unknown keys and invalid values both raise here.
+    try:
+        DispatchConfig.model_validate(data)
+    except ValidationError as exc:
+        details = "; ".join(
+            f"{'.'.join(str(p) for p in err['loc']) or '(root)'}: {err['msg']}"
+            for err in exc.errors()
         )
+        raise typer.BadParameter(f"Invalid {filename}: {details}") from exc
 
     return data
 
@@ -233,7 +224,7 @@ def save_dispatch_yaml(path: str, config: dict) -> None:
 
 def _config_for_yaml(config: dict) -> dict:
     """Return a serializable subset of config for dispatch.yaml."""
-    keys = DEFAULT_CONFIG.keys()
+    keys = DispatchConfig.model_fields
     always_include = {"namespace", "agent_name", "entrypoint", "base_image"}
 
     payload: dict[str, object] = {}
@@ -500,9 +491,7 @@ def _coerce_volumes(volumes: list[dict[str, Any]] | None) -> list[dict[str, Any]
 def load_dispatch_config(path: str, apply_defaults: bool = True) -> dict:
     """Load dispatch configuration, merging defaults, pyproject, and dispatch.yaml."""
     pyproject = read_pyproject(path)
-    config = copy.deepcopy(DEFAULT_CONFIG)
-    config.update(read_project_config(path, pyproject))
-    config.update(read_dispatch_yaml(path))
+    config = {**read_project_config(path, pyproject), **read_dispatch_yaml(path)}
 
     if apply_defaults:
         return _apply_default_values(config, pyproject, path)
@@ -518,9 +507,7 @@ def load_dispatch_config(path: str, apply_defaults: bool = True) -> dict:
 def configure_dispatch_project(path: str, assume_yes=False) -> dict[str, Any]:
     """Interactive configuration flow used by `dispatch agent init`."""
     pyproject = read_pyproject(path)
-    config = copy.deepcopy(DEFAULT_CONFIG)
-    config.update(read_project_config(path, pyproject))
-    config.update(read_dispatch_yaml(path))
+    config = {**read_project_config(path, pyproject), **read_dispatch_yaml(path)}
 
     config = prompt_for_missing_config(config, assume_yes, path)
     config = _apply_default_values(config, pyproject, path)
@@ -545,22 +532,30 @@ def has_python_reqs(path: str, warn=True) -> bool:
     return True
 
 
+def _read_dotenv_keys(abs_path: str) -> set[str]:
+    """Return variable names defined in the .env file at abs_path.
+
+    Returns an empty set if the file doesn't exist.
+    """
+    dotenv_path = os.path.join(abs_path, ".env")
+    if not os.path.exists(dotenv_path):
+        return set()
+    keys: set[str] = set()
+    with open(dotenv_path, encoding="utf-8") as fh:
+        for line in fh:
+            line = line.strip()
+            if line and not line.startswith("#") and "=" in line:
+                keys.add(line.split("=", 1)[0].strip())
+    return keys
+
+
 def check_dotenv_has_all_secrets(path, config) -> None:
     """Warn if secret defined in dispatch.yaml is not set in .env"""
     logger = get_logger()
     secrets = config.get("secrets") or []
     if not secrets:
         return
-    dotenv_path = os.path.join(path, ".env")
-    existing_env_vars = set()
-
-    if os.path.exists(dotenv_path):
-        with open(dotenv_path, encoding="utf-8") as fh:
-            for line in fh:
-                line = line.strip()
-                if line and not line.startswith("#") and "=" in line:
-                    var_name = line.split("=", 1)[0].strip()
-                    existing_env_vars.add(var_name)
+    existing_env_vars = _read_dotenv_keys(path)
 
     for secret in secrets:
         secret_var = secret["name"]
@@ -621,22 +616,8 @@ def check_env_secrets_not_in_config(path: str, config: dict) -> list[str]:
         Empty list if all secrets are configured.
     """
     logger = get_logger()
-    dotenv_path = os.path.join(path, ".env")
-
-    if not os.path.exists(dotenv_path):
-        return []
-
-    # Get configured secrets from dispatch.yaml
     configured_secrets = {s["name"] for s in (config.get("secrets") or [])}
-
-    # Parse .env file for variable names
-    env_vars: set[str] = set()
-    with open(dotenv_path, encoding="utf-8") as fh:
-        for line in fh:
-            line = line.strip()
-            if line and not line.startswith("#") and "=" in line:
-                var_name = line.split("=", 1)[0].strip()
-                env_vars.add(var_name)
+    env_vars = _read_dotenv_keys(path)
 
     # LLM keys are managed by the gateway — don't flag them as missing
     missing_secrets = sorted(env_vars - configured_secrets - LLM_PROVIDER_KEY_NAMES)
@@ -679,6 +660,255 @@ def check_env_secrets_not_in_config(path: str, config: dict) -> list[str]:
     return missing_secrets
 
 
+# ---------------------------------------------------------------------------
+# Dev-mode warnings: LLM key detection, MCP import scanning, secrets checks
+# ---------------------------------------------------------------------------
+
+# Package names in pyproject.toml that indicate direct LLM API usage.
+# Normalized to lowercase with hyphens — matched after stripping version/extras.
+_LLM_INDICATOR_PACKAGES = frozenset(
+    {
+        "openai-agents",
+        "claude-agent-sdk",
+        "anthropic",
+        "openai",
+        "google-generativeai",
+        "langchain",
+        "langchain-openai",
+        "langchain-anthropic",
+        "langchain-google-genai",
+    }
+)
+
+# Maps a detected package to the router provider name it implies.
+# Packages not in this map (e.g. bare "langchain") don't imply a specific provider.
+_PACKAGE_TO_PROVIDER: dict[str, str] = {
+    "openai": "openai",
+    "openai-agents": "openai",
+    "langchain-openai": "openai",
+    "anthropic": "anthropic",
+    "claude-agent-sdk": "anthropic",
+    "langchain-anthropic": "anthropic",
+    "google-generativeai": "google",
+    "langchain-google-genai": "google",
+}
+
+
+def _collect_missing_dotenv_secrets(abs_path: str, config: dict) -> list[str]:
+    """Return secret names declared in dispatch.yaml but absent from .env and os.environ."""
+    secrets = config.get("secrets") or []
+    if not secrets:
+        return []
+
+    # Collect names present in the environment (covers CI injection and shell exports)
+    existing: set[str] = set(os.environ.keys()) | _read_dotenv_keys(abs_path)
+
+    missing = []
+    for s in secrets:
+        if not isinstance(s, dict):
+            # Bare string entries (e.g. `secrets: ["MY_SECRET"]`) are invalid config;
+            # flag them rather than silently skipping so the user sees an actionable warning.
+            name = str(s).strip()
+            if name and name not in LLM_PROVIDER_KEY_NAMES and name not in existing:
+                missing.append(name)
+            continue
+        name = str(s.get("name") or "")
+        if name and name not in LLM_PROVIDER_KEY_NAMES and name not in existing:
+            missing.append(name)
+    return missing
+
+
+def collect_mcp_import_files(abs_path: str) -> list[str]:
+    """Return relative paths of source files that import get_mcp_servers from contrib."""
+    matches: list[str] = []
+    for root, dirs, files in os.walk(abs_path):
+        dirs[:] = [
+            d
+            for d in dirs
+            if not d.startswith(".")
+            and d not in ("__pycache__", ".venv", "node_modules")
+        ]
+        for fname in files:
+            if not fname.endswith(".py"):
+                continue
+            fpath = os.path.join(root, fname)
+            try:
+                content = open(fpath, encoding="utf-8", errors="ignore").read()
+                tree = ast.parse(content, filename=fpath)
+            except (OSError, SyntaxError) as e:
+                get_logger().debug(f"Skipping unreadable file {fpath}: {e}")
+                continue
+            if any(
+                isinstance(node, ast.ImportFrom)
+                and (node.module or "").startswith("dispatch_agents.contrib.")
+                and any(alias.name == "get_mcp_servers" for alias in node.names)
+                for node in ast.walk(tree)
+            ):
+                matches.append(os.path.relpath(fpath, abs_path))
+    return matches
+
+
+def _collect_llm_packages(abs_path: str) -> list[str]:
+    """Return LLM-indicator package names found in pyproject.toml dependencies."""
+
+    pyproject_path = os.path.join(abs_path, "pyproject.toml")
+    if not os.path.exists(pyproject_path):
+        return []
+
+    try:
+        with open(pyproject_path, "rb") as fh:
+            doc = tomlkit.load(fh)
+
+        project = doc.get("project") or {}
+        deps_raw: list = list(project.get("dependencies") or [])
+        for group in (project.get("optional-dependencies") or {}).values():
+            deps_raw.extend(group or [])
+
+        found: list[str] = []
+        for dep in deps_raw:
+            m = re.match(r"^([A-Za-z0-9][A-Za-z0-9._-]*)", str(dep))
+            if m:
+                normalized = m.group(1).lower().replace("_", "-")
+                if normalized in _LLM_INDICATOR_PACKAGES:
+                    found.append(normalized)
+        return found
+    except Exception as e:
+        get_logger().debug(f"LLM package detection skipped: {type(e).__name__}: {e}")
+        return []
+
+
+def _check_llm_keys_via_router(router_url: str) -> list[str]:
+    """Return provider names that have no key configured in the router.
+
+    Queries the router's LLM config endpoint, which has authoritative visibility
+    into keys stored via Keychain, environment variables, or the local UI —
+    without loading any key material into the current process.
+    """
+    resp = requests.get(f"{router_url}/api/unstable/llm-config/local", timeout=3)
+    resp.raise_for_status()
+    data = resp.json()
+    return [
+        p["provider"]
+        for p in data.get("providers", [])
+        if not p.get("configured", False)
+    ]
+
+
+def _make_warning(
+    warning_type: str, title: str, description: str, items: list[str]
+) -> dict:
+    """Build a structured dev-mode warning dict for the local UI."""
+    return {
+        "type": warning_type,
+        "severity": "warning",
+        "title": title,
+        "description": description,
+        "items": items,
+    }
+
+
+def _secret_warnings(abs_path: str, config: dict) -> list[dict]:
+    """Return a warning if any dispatch.yaml secrets are missing from the local env."""
+    missing = _collect_missing_dotenv_secrets(abs_path, config)
+    if not missing:
+        return []
+    return [
+        _make_warning(
+            "missing_secret",
+            "Missing local secrets",
+            f"{len(missing)} secret(s) declared in dispatch.yaml "
+            "are not set in your .env file. The agent may crash when "
+            "accessing these secrets locally.",
+            missing,
+        )
+    ]
+
+
+def _mcp_warnings(config: dict) -> list[dict]:
+    """Return a warning if the agent declares MCP servers (unavailable in local dev)."""
+    mcp_servers = config.get("mcp_servers") or []
+    if not mcp_servers:
+        return []
+    server_names = [
+        s.get("server", str(s)) if isinstance(s, dict) else str(s) for s in mcp_servers
+    ]
+    return [
+        _make_warning(
+            "mcp_unavailable",
+            "MCP servers not available locally",
+            "This agent uses MCP servers which are only available when deployed. "
+            "MCP tool calls will be skipped in local dev mode.",
+            server_names,
+        )
+    ]
+
+
+def _llm_key_warnings(abs_path: str, router_url: str | None) -> list[dict]:
+    """Return a warning if the agent uses LLM libraries whose provider keys are missing."""
+    llm_packages = _collect_llm_packages(abs_path)
+    if not llm_packages:
+        return []
+
+    try:
+        if router_url:
+            # Preferred: ask the router, which can see Keychain-stored keys and
+            # keys set via the local UI — without leaking secrets into this process.
+            unconfigured = _check_llm_keys_via_router(router_url)
+        else:
+            from dispatch_cli.router.local_llm import get_configured_providers
+
+            configured = get_configured_providers()
+            unconfigured = [p for p, ok in configured.items() if not ok]
+
+        # Narrow to providers the detected packages actually imply so we
+        # don't flag openai when the agent only depends on anthropic.
+        suggested_providers = {
+            _PACKAGE_TO_PROVIDER[pkg]
+            for pkg in llm_packages
+            if pkg in _PACKAGE_TO_PROVIDER
+        }
+        relevant_unconfigured = (
+            [p for p in unconfigured if p in suggested_providers]
+            if suggested_providers
+            else unconfigured
+        )
+
+        if not relevant_unconfigured:
+            return []
+        return [
+            _make_warning(
+                "llm_keys_missing",
+                "LLM provider keys not fully configured",
+                "This agent uses LLM libraries. The following providers "
+                "have no API key configured locally — if the agent calls "
+                "one of them it will crash. "
+                "Run `dispatch llm local <provider>` to configure keys.",
+                relevant_unconfigured,
+            )
+        ]
+    except Exception as e:
+        # Non-fatal — skip LLM key check if router is unreachable or returns
+        # an unexpected shape. Logged at debug so it's discoverable without
+        # spamming the console in the common case.
+        get_logger().debug(f"LLM key check skipped: {type(e).__name__}: {e}")
+        return []
+
+
+def collect_agent_warnings(
+    abs_path: str, config: dict, router_url: str | None = None
+) -> list[dict]:
+    """Analyze an agent project and return structured warnings for the local UI.
+
+    Called at 'dispatch agent dev' startup and sent to the router so the
+    Warnings tab in the local UI is populated immediately on load.
+    """
+    return [
+        *_secret_warnings(abs_path, config),
+        *_mcp_warnings(config),
+        *_llm_key_warnings(abs_path, router_url),
+    ]
+
+
 def validate_dispatch_project(path: str) -> bool:
     """Validate that dispatch project has been initialized."""
     logger = get_logger()
@@ -694,7 +924,7 @@ def validate_dispatch_project(path: str) -> bool:
     for check_path in [dispatch_dir, listener_path]:
         if not os.path.exists(check_path):
             logger.error(
-                f"{check_path} not found. "
+                f"{os.path.relpath(check_path, path)} not found. "
                 "Run 'dispatch agent init' to regenerate project assets."
             )
             return False

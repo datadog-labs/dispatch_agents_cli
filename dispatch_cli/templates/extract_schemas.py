@@ -44,7 +44,9 @@ if os.path.exists(env_file):
                 print(f"[extract_schemas] Set {key.strip()}")
 
 # Import SDK functions
-from dispatch_agents import BasePayload, Message, get_handler_schemas
+from dispatch_agents import BasePayload
+from dispatch_agents._internal.models import Message
+from dispatch_agents.handlers import get_handler_schemas
 
 
 def extract_schemas_and_compliance():

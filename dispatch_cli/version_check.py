@@ -5,19 +5,105 @@ Also provides SDK version suggestion for agent projects based on CLI's bundled S
 """
 
 import json
+import sys
+import time
 from datetime import datetime, timedelta
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as _get_version
 from pathlib import Path
 
 import requests
+import typer
 from packaging.version import Version
 from platformdirs import user_cache_dir
+
+from dispatch_cli.logger import get_logger
 
 # Cache configuration
 CACHE_DIR = Path(user_cache_dir("dispatch", "DataDog"))
 VERSION_CHECK_CACHE = CACHE_DIR / "version_check.json"
 VERSION_CHECK_INTERVAL = timedelta(hours=3)
+
+# Hard minimum-version gate: re-validate at most once per this many seconds so
+# a long-running process (e.g. an MCP server in an editor/Claude session) still
+# notices a backend minimum bump mid-session, without fetching on every call.
+_MIN_VERSION_CHECK_TTL = 60.0
+_last_min_version_ok: float | None = None  # monotonic time of last passing check
+
+
+def _cli_below_minimum(backend_url: str) -> tuple[bool, str, str]:
+    """Return (is_below_minimum, current_version, minimum_version).
+
+    is_below_minimum is True ONLY when we positively determined the running CLI
+    is older than the backend's minimum. Every uncertain case (can't fetch the
+    requirement, missing field, unparseable version) returns False so the gate
+    fails open — a backend blip or offline use never bricks the CLI.
+    """
+    requirements = get_sdk_version_requirements(backend_url)
+    if not requirements:
+        return (False, "", "")
+    minimum = requirements.get("cli_minimum")
+    if not minimum:
+        return (False, "", "")
+    try:
+        current = _get_version("dispatch-cli")
+    except Exception:
+        return (False, "", "")
+    try:
+        return (Version(current) < Version(minimum), current, minimum)
+    except Exception:
+        return (False, "", "")
+
+
+def enforce_minimum_cli_version(backend_url: str) -> None:
+    """Hard-stop when the running CLI is below the backend's minimum version.
+
+    Called from the backend-request chokepoints (``get_auth_headers`` and the
+    MCP client), so any backend operation refuses to run on a CLI the backend
+    no longer supports — instead of letting it through to fail with a confusing
+    downstream error.
+
+    - Bypassed when ``--force`` appears in argv (intentionally undocumented).
+    - Fails OPEN (see ``_cli_below_minimum``) so offline use isn't bricked.
+    - When it does NOT block, the result is cached for ``_MIN_VERSION_CHECK_TTL``
+      seconds (avoids re-fetching on every request). The blocking path is never
+      cached, so a long-running session (e.g. an MCP server) keeps getting
+      stopped until it's restarted on an up-to-date CLI.
+    """
+    global _last_min_version_ok
+
+    if "--force" in sys.argv:
+        return
+
+    now = time.monotonic()
+    if (
+        _last_min_version_ok is not None
+        and now - _last_min_version_ok < _MIN_VERSION_CHECK_TTL
+    ):
+        return
+
+    below, current, minimum = _cli_below_minimum(backend_url)
+    if not below:
+        _last_min_version_ok = now
+        return
+
+    logger = get_logger()
+    logger.error(
+        f"Your dispatch CLI (v{current}) is below the minimum version "
+        f"(v{minimum}) supported by this backend. Update before continuing:"
+    )
+    logger.code(
+        "uv tool install git+ssh://git@github.com/datadog-labs/"
+        "dispatch_agents_cli.git --upgrade",
+        "bash",
+        "To update, run:",
+    )
+    logger.info(
+        "If a long-running session is using the CLI (e.g. an MCP server in "
+        "your editor or Claude), restart it after updating so it loads the "
+        "new version."
+    )
+    raise typer.Exit(1)
 
 
 def _ensure_cache_dir():
@@ -105,8 +191,6 @@ def check_and_notify_cli_update(backend_url: str):
     Args:
         backend_url: Base URL of the backend API
     """
-    import sys
-
     if not sys.stdout.isatty():
         return
 

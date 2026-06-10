@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { Button } from '@ui/button';
 import { Card, CardHeader, CardTitle, CardContent } from '@ui/card';
-import { Send, Sparkles, Zap, Radio, Loader2, CheckCircle2, XCircle, Copy, Clock } from 'lucide-react';
+import { Send, RotateCcw, Zap, Radio, Loader2, CheckCircle2, XCircle, Copy, Clock } from 'lucide-react';
 
 const SendTestEventCard = ({ appState }) => {
   const { topics, selectedAgent, isTopicDetailsPage, isAgentDetailsPage } = appState;
@@ -875,8 +875,8 @@ const SendTestEventCard = ({ appState }) => {
                   </>
                 ) : (
                   <>
-                    <Sparkles className="w-3 h-3 inline mr-1" />
-                    Auto-populate
+                    <RotateCcw className="w-3 h-3 inline mr-1" />
+                    Reset payload
                   </>
                 )}
               </button>

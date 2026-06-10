@@ -545,7 +545,7 @@ wheels = [
 
 [[package]]
 name = "dispatch-agents"
-version = "0.13.1"
+version = "0.14.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "aiohttp" },
@@ -558,14 +558,14 @@ dependencies = [
     { name = "pyyaml" },
     { name = "tomlkit" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/13/ab/c890809d051367bbd05c90405006a7a1a508242fbbc8268b053929f5788a/dispatch_agents-0.13.1.tar.gz", hash = "sha256:a58be6f89181a2b686af72174e0332887cce9a0a0cf6979fec11822258708e97", size = 574641, upload-time = "2026-04-27T20:38:19.673Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/ef/ff/b2488b98dfcc0974e7390058cdae3b61e55bfb241a9b75ae8fe883b49976/dispatch_agents-0.14.1.tar.gz", hash = "sha256:4f6d82a4b140a19b3c082438e02d850303f5388ae1806ea2ca699bf29902ecec", size = 587934, upload-time = "2026-06-10T18:36:58.434Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/bf/a4/37912d0f301f1a1bd819d8388c9f2b2734616e77e24e39062d1b16646d90/dispatch_agents-0.13.1-py3-none-any.whl", hash = "sha256:962eb53f1e21df99c38f1afeb5d19298712a7a9ce87341affd16f76812679128", size = 110759, upload-time = "2026-04-27T20:38:18.693Z" },
+    { url = "https://files.pythonhosted.org/packages/55/c4/b165540762711193be24d6f689fa20268fc64029d80c4574bc87bbb44a47/dispatch_agents-0.14.1-py3-none-any.whl", hash = "sha256:9da74ed1d403185be88f112192e8139fb36d5290c304239a6f58664b09fdced3", size = 116971, upload-time = "2026-06-10T18:36:56.961Z" },
 ]
 
 [[package]]
 name = "dispatch-cli"
-version = "0.10.0"
+version = "0.11.1"
 source = { editable = "." }
 dependencies = [
     { name = "aiohttp" },

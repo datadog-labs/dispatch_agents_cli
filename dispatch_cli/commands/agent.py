@@ -20,7 +20,7 @@ from typing import IO, Annotated, cast
 import pathspec
 import requests
 import typer
-from dispatch_agents.models import AgentContainerStatus
+from dispatch_agents._internal.models import AgentContainerStatus
 from rich.console import Console
 from rich.markup import escape
 from rich.progress import (
@@ -35,7 +35,6 @@ from rich.table import Table
 from watchfiles import PythonFilter, watch
 
 from dispatch_cli.auth import get_auth_headers, handle_auth_error
-from dispatch_cli.auth_provider import default_credential_provider
 from dispatch_cli.commands.router import (
     get_active_router,
     start_router_background,
@@ -61,6 +60,8 @@ from dispatch_cli.utils import (
     LOCAL_ROUTER_URL,
     check_dotenv_has_all_secrets,
     check_env_secrets_not_in_config,
+    collect_agent_warnings,
+    collect_mcp_import_files,
     configure_dispatch_project,
     derive_agent_name,
     extract_local_deps_from_pyproject,
@@ -507,76 +508,6 @@ def build_namespaced_url(endpoint: str, namespace: str) -> str:
         if endpoint.startswith(prefix):
             return f"{DISPATCH_API_BASE}/api/unstable/namespace/{namespace}{endpoint}"
     raise ValueError(f"Unmapped endpoint prefix: {endpoint!r}")
-
-
-def _current_user_email() -> str | None:
-    """Best-effort current user email for the local ownership preflight.
-
-    Returns ``None`` when identity can't be determined client-side (e.g.
-    API-key auth), in which case the caller defers the ownership decision
-    to the backend, which enforces it authoritatively.
-    """
-    try:
-        credential = default_credential_provider().resolve()
-    except Exception:
-        return None
-    return credential.user_email
-
-
-def _confirm_overwrite_if_exists(*, agent_name: str, namespace: str) -> None:
-    """Block a deploy from overwriting an agent owned by someone else.
-
-    Calls ``GET /agents/{name}``: 404 means new agent (proceed). If the agent
-    exists and the current user created it, the deploy proceeds without a flag.
-    If it's owned by a different user, exit non-zero and tell them to pass
-    ``--overwrite``. When the current identity can't be resolved locally (e.g.
-    API-key auth), defer to the backend, which enforces ownership too. Any
-    non-200/404 status is treated as transient and the deploy continues so we
-    don't gate releases on a flaky existence probe.
-    """
-    logger = get_logger()
-    try:
-        response = requests.get(
-            build_namespaced_url(f"/agents/{agent_name}", namespace),
-            headers=get_auth_headers(),
-            timeout=15,
-        )
-    except requests.exceptions.RequestException as exc:
-        logger.warning(
-            f"Could not verify whether agent '{agent_name}' already exists "
-            f"({exc}). Proceeding with deploy."
-        )
-        return
-
-    if response.status_code == 404:
-        return
-    if response.status_code != 200:
-        logger.warning(
-            f"Unexpected status {response.status_code} checking for existing "
-            f"agent '{agent_name}'. Proceeding with deploy."
-        )
-        return
-
-    # Agent exists. Owners may overwrite their own agent without a flag.
-    owner = (response.json().get("metadata") or {}).get("created_by")
-    current_user = _current_user_email()
-    if current_user is None:
-        # Can't determine identity locally (e.g. API key). Let the backend
-        # decide — it returns 403 if this isn't the owner and --overwrite
-        # wasn't passed.
-        return
-    if owner == current_user:
-        return
-
-    logger.error(
-        f"Agent '{agent_name}' already exists in namespace '{namespace}' and "
-        f"is owned by {owner or 'another user'}. Pass --overwrite to overwrite it."
-    )
-    logger.info(
-        "To deploy this as a separate agent instead, change `agent_name` "
-        "or `namespace` in dispatch.yaml and deploy again."
-    )
-    raise typer.Exit(1)
 
 
 def uv_is_installed() -> bool:
@@ -1083,13 +1014,25 @@ def dev(
                 )
                 raise typer.Exit(1)
 
-    # Pre-register agent URL with router (so it knows the correct gRPC port)
+    # Collect structured warnings (secrets, MCP, LLM keys) for the local UI Warnings tab.
+    # Pass the router URL so the LLM key check queries the router rather than loading
+    # Keychain secrets into this process (which would leak them via os.environ.copy() below).
+    agent_warnings = collect_agent_warnings(
+        abs_path, config, router_url=f"{LOCAL_ROUTER_URL}:{router_port}"
+    )
+
+    # Pre-register agent URL with router (so it knows the correct gRPC port).
+    # Warnings are piggybacked here so the UI can display them immediately on load.
     agent_url = f"127.0.0.1:{agent_port}"
     try:
         register_url = f"{LOCAL_ROUTER_URL}:{router_port}/api/unstable/agents/register"
         resp = requests.post(
             register_url,
-            json={"agent_name": agent_name, "url": agent_url},
+            json={
+                "agent_name": agent_name,
+                "url": agent_url,
+                "warnings": agent_warnings,
+            },
             timeout=5,
         )
         resp.raise_for_status()
@@ -1097,6 +1040,16 @@ def dev(
     except requests.RequestException as e:
         logger.warning(f"Failed to pre-register agent with router: {e}")
         # Continue anyway - router will fall back to default port
+
+    # Warn in the console if get_mcp_servers() is imported. On older SDK versions
+    # that don't have the graceful-degradation fix, the agent crashes before the UI loads.
+    if collect_mcp_import_files(abs_path):
+        logger.warning(
+            "This agent imports get_mcp_servers() from dispatch_agents.contrib. "
+            "In local dev mode, .mcp.json is not present, which crashes the agent "
+            "on older SDK versions. Update to the latest SDK to run locally, or "
+            "remove the get_mcp_servers() call from your @init handler."
+        )
 
     # Generate schemas for local development
     try:
@@ -1176,7 +1129,7 @@ def dev(
     agent_env = os.environ.copy()
     agent_env.update(
         {
-            "BACKEND_URL": LOCAL_ROUTER_URL + f":{router_port}",
+            "DISPATCH_BACKEND_URL": LOCAL_ROUTER_URL + f":{router_port}",
             "DISPATCH_NAMESPACE": "dev",
             "DISPATCH_API_KEY": "local-dev-key",
             # Enable local dev mode behaviors (e.g., auto-shutdown on backend connection failure)
@@ -1219,9 +1172,11 @@ def dev(
 
         logger.info(f"Dev data directory: {dev_data_dir}")
 
-    # Enable verbose SDK logging if requested
+    # Enable verbose SDK logging if requested. DISPATCH_LOG_LEVEL is the
+    # operational override the SDK's logging reads before the dispatch.yaml
+    # log_level field.
     if verbose:
-        agent_env["DISPATCH_VERBOSE"] = "1"
+        agent_env["DISPATCH_LOG_LEVEL"] = "DEBUG"
         logger.info("Verbose mode enabled - showing all SDK logs")
 
     try:
@@ -1954,11 +1909,11 @@ def deploy(
         typer.Option(
             "--force",
             help=(
-                "Skip CLI-side checks (unconfigured-secret block, "
-                "unsupported base_image block, schema compatibility "
-                "validation) and deploy anyway. Does NOT drop egress "
-                "selectors that violate the org allow list — use "
-                "--allow-egress-drop for that."
+                "Deploy-anyway escape hatch: skips CLI-side checks "
+                "(unconfigured-secret block, unsupported base_image block, "
+                "schema compatibility validation) AND implies "
+                "--allow-egress-drop. Use the narrower flags if you only want "
+                "one of those behaviors."
             ),
         ),
     ] = False,
@@ -1976,14 +1931,19 @@ def deploy(
             ),
         ),
     ] = False,
-    overwrite: Annotated[
+    skip_checks: Annotated[
         bool,
         typer.Option(
-            "--overwrite",
+            "--skip-checks",
+            hidden=True,
             help=(
-                "Overwrite an existing agent of the same name that was "
-                "created by a different user. You can always overwrite your "
-                "own agents without this flag."
+                "Skip CLI-side validation (unconfigured-secret block, "
+                "unsupported base_image block, SDK-compatibility prompt) "
+                "WITHOUT implying --allow-egress-drop. This is the same "
+                "validation-skipping --force does, but narrower: it leaves "
+                "the egress check that --force would override still in "
+                "effect. Internal flag for automation (e.g. the operator "
+                "MCP) that needs to skip validation while keeping that guard."
             ),
         ),
     ] = False,
@@ -2003,9 +1963,14 @@ def deploy(
     config = load_dispatch_config(abs_path)
     logger = get_logger()
 
+    # Local CLI checks are bypassed by --force (umbrella) or --skip-checks
+    # (narrow, non-interactive, used by automation). Egress-drop is not implied
+    # by --skip-checks — that follows --force/--allow-egress-drop.
+    local_bypass = force or skip_checks
+
     # Check if .env has secrets not configured in .dispatch.yaml
     unconfigured_secrets = check_env_secrets_not_in_config(abs_path, config)
-    if unconfigured_secrets and not force:
+    if unconfigured_secrets and not local_bypass:
         logger.error("Deployment blocked: unconfigured secrets found in .env file.")
         logger.info(
             "Add these secrets to dispatch.yaml or use --force to deploy anyway."
@@ -2016,7 +1981,7 @@ def deploy(
     # early (the backend rejects them too). Omitting the field uses the default.
     unsupported_base_image = get_unsupported_base_image(config)
     if unsupported_base_image:
-        if not force:
+        if not local_bypass:
             logger.error(
                 f"Deployment blocked: base_image '{unsupported_base_image}' is "
                 "not supported."
@@ -2058,14 +2023,6 @@ def deploy(
         raise typer.Exit(1)
     agent_name = get_agent_name_from_project(abs_path, config)
 
-    # Ownership check: block overwriting an agent owned by another user
-    # unless --overwrite is passed. Owners may overwrite their own agents
-    # freely. --force skips this local probe (the established "I know what
-    # I'm doing" escape hatch), but only --overwrite is propagated to the
-    # server, so the backend ownership gate still applies to a --force deploy.
-    if not (overwrite or force):
-        _confirm_overwrite_if_exists(agent_name=agent_name, namespace=namespace)
-
     # Check SDK version (every deploy)
     detected_sdk_version = get_sdk_version_from_agent(abs_path)
     if detected_sdk_version:
@@ -2104,11 +2061,19 @@ def deploy(
                 if update_cmd:
                     logger.code(update_cmd, "bash", "To update, run:")
 
-            if not force:
-                user_confirmed = typer.confirm(
+            if not local_bypass:
+                if not sys.stdin.isatty():
+                    # Non-interactive (CI, MCP, piped): can't prompt, so
+                    # proceed with the prompt's default (continue) rather than
+                    # hang/abort on EOF. The SDK is outdated, not incompatible
+                    # — an incompatible SDK is the "blocked" branch above and
+                    # still hard-fails.
+                    logger.warning(
+                        "SDK is outdated; continuing (non-interactive session)."
+                    )
+                elif not typer.confirm(
                     "Continue with deployment anyway?", default=True
-                )
-                if not user_confirmed:
+                ):
                     logger.warning("Deployment cancelled.")
                     raise typer.Exit(0)
         elif status == "error":
@@ -2131,7 +2096,7 @@ def deploy(
 
     # Run validation checks
     logger.info("Running pre-deployment validation...")
-    if not force:
+    if not local_bypass:
         try:
             validate(namespace=namespace, path=path, force=force)
         except typer.Exit as e:
@@ -2218,9 +2183,11 @@ def deploy(
     logger.success("Upload complete")
     # Step 3: Push the image via codebuild
     # Note: secrets and other config are now read from dispatch.yaml in the uploaded source package.
-    # The server-side `force` flag is now controlled exclusively by
-    # --allow-egress-drop (spec §11.2 req 74). The CLI's --force only
-    # bypasses local checks and is NOT propagated to the server.
+    # --force is the umbrella "deploy anyway" escape hatch, so it folds into
+    # both server-side flags: the egress `force` flag (drop out-of-policy
+    # egress selectors, spec §11.2 req 74) and `overwrite` (overwrite an agent
+    # owned by another user). --allow-egress-drop and --overwrite are the
+    # narrower flags for triggering just one of those.
     try:
         with Status("Building and checking in image to production...", spinner="dots"):
             push_resp = requests.post(
@@ -2228,8 +2195,7 @@ def deploy(
                 data={
                     "agent_name": agent_name,
                     "namespace": namespace,
-                    "force": "true" if allow_egress_drop else "false",
-                    "overwrite": "true" if overwrite else "false",
+                    "force": "true" if (allow_egress_drop or force) else "false",
                 },
                 headers=auth_headers,
                 timeout=600,
@@ -2238,21 +2204,6 @@ def deploy(
     except requests.exceptions.HTTPError as e:
         if e.response.status_code == 401:  # Unauthorized
             handle_auth_error("Invalid or expired API key")
-        if e.response.status_code == 403:  # Owned by another user
-            # Surface the backend detail verbatim — it names the owner and
-            # tells the user to pass --overwrite.
-            try:
-                detail = e.response.json().get("detail")
-            except ValueError:
-                detail = None
-            logger.error(
-                detail
-                or (
-                    f"Agent '{agent_name}' is owned by another user. "
-                    "Pass --overwrite to overwrite it."
-                )
-            )
-            raise typer.Exit(1)
         if e.response.status_code == 409:
             logger.error(
                 f"A deployment is already in progress for agent '{agent_name}'. "
@@ -2352,6 +2303,11 @@ def deploy(
                             f"egress domain '{escape(rendered)}' violates org policy"
                         )
                     logger.error(escape(error))
+                    logger.info(
+                        "Re-run with --allow-egress-drop to deploy with the "
+                        "out-of-policy selectors dropped, or have an org admin "
+                        "widen the org egress allow list."
+                    )
                     raise typer.Exit(2)
                 logger.error(f"Deployment failed: {escape(error)}")
                 raise typer.Exit(1)

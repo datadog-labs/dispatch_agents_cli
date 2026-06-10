@@ -1,168 +1,317 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
+import { useParams, useNavigate } from 'react-router-dom';
 import { Button } from '@ui/button';
-import { Card, CardHeader, CardTitle, CardContent } from '@ui/card';
-import { Radio, Waypoints } from 'lucide-react';
-import SendTestEventCard from './SendTestEventCard';
+import { SchemaDisplay } from '@ui/schema-display';
+import { Radio, Waypoints, Code, RotateCcw, Send, Loader2 } from 'lucide-react';
 import MessageFeedCard from './MessageFeedCard';
+import RunHistoryPanel from './RunHistoryPanel';
+import TabBar from './TabBar';
+import JsonTextarea from './JsonTextarea';
+import OutputTray from './OutputTray';
+import { dotColor } from './StatusBadge';
+import { useDraggableTray } from '@/hooks/useDraggableTray';
+import { generateExampleFromSchema } from '@/utils/schema';
 
 const TopicDetailsPage = ({ appState }) => {
-  const {
-    selectedTopic,
-    agents,
-    showTopicsList,
-    showAgentDetails
-  } = appState;
+  const { topicName } = useParams();
+  const navigate = useNavigate();
+  const { agents } = appState;
 
+  const subscribingAgents = agents.filter(agent =>
+    Array.isArray(agent.topics) && agent.topics.includes(topicName)
+  );
 
-  if (!selectedTopic) {
-    return (
-      <div className="text-center py-12">
-        <p className="text-gray-500">No topic selected</p>
-        <Button
-          onClick={showTopicsList}
-          variant="outline"
-          className="mt-4"
-        >
-          Back to Topics
-        </Button>
-      </div>
-    );
-  }
+  // Panel tabs
+  const [activeTab, setActiveTab] = useState('send');
 
-  // Get the topic name properly
-  const topicName = typeof selectedTopic === 'string' ? selectedTopic : selectedTopic?.name;
+  // ── Run history ────────────────────────────────────────────────────────────
+  // historyAgentKey uses a topic: prefix so topic runs are stored separately
+  // from agent runs in the router's in-memory store.
+  const historyAgentKey = `topic:${topicName}`;
+  const [runHistoryCount, setRunHistoryCount] = useState(0);
 
-  // Get agents that subscribe to this topic
-  // Use the real data structure from the router
-  const subscribingAgents = agents.filter(agent => {
-    if (!agent.topics || !Array.isArray(agent.topics)) return false;
-    return agent.topics.includes(topicName);
-  });
+  // Schema — fetched from /schemas/topics bulk endpoint, same as SendTestEventCard
+  const [inputSchema, setInputSchema] = useState(null);
+  const [schemaLoading, setSchemaLoading] = useState(false);
+  const [schemaError, setSchemaError] = useState(null);
+  const [rawSchemaEntries, setRawSchemaEntries] = useState(null);
 
-  // Create a mock selected agent for the event cards to work properly
-  // This allows us to reuse the existing SendTestEventCard and MessageFeedCard
-  const mockSelectedAgent = {
-    name: topicName,
-    // Create mock functions structure for compatibility with SendTestEventCard
-    functions: [{
-      name: 'topic_handler',
-      triggers: [{
-        type: 'topic',
-        topic: topicName
-      }]
-    }]
-  };
+  // Send event
+  const [payload, setPayload] = useState('{}');
+  const [jsonError, setJsonError] = useState(null);
+  const [isSending, setIsSending] = useState(false);
+  const [sendError, setSendError] = useState(null);
 
-  // Enhanced app state for the cards - configured specifically for Topic Details
+  // Tray
+  const tray = useDraggableTray();
+  const [isRunning, setIsRunning] = useState(false);
+  const [hasFeedContent, setHasFeedContent] = useState(false);
+  const feedClearRef = React.useRef(null);
+
   const topicAppState = {
     ...appState,
-    selectedAgent: mockSelectedAgent,
-    topics: [topicName], // Single topic for this page
-    isTopicDetailsPage: true // Flag to indicate this is Topic Details page
+    selectedAgent: { name: `topic:${topicName}` },
+    isTopicDetailsPage: true,
   };
 
+  // Fetch schema — mirrors the two-step approach in SendTestEventCard
+  const fetchSchema = useCallback(async () => {
+    setSchemaLoading(true);
+    setSchemaError(null);
+    try {
+      const res = await fetch('/api/unstable/schemas/topics');
+      if (res.ok) {
+        const data = await res.json();
+        const entries = (data.topics || {})[topicName] || [];
+        setRawSchemaEntries(entries);
+        if (entries.length > 0 && entries[0].schema?.input_schema) {
+          const s = entries[0].schema.input_schema;
+          setInputSchema(s);
+          const p = JSON.stringify(generateExampleFromSchema(s), null, 2);
+          setPayload(p);
+          return;
+        }
+      }
+      setSchemaError('No schema registered for this topic yet.');
+    } catch {
+      setSchemaError('Could not load schema.');
+    } finally {
+      setSchemaLoading(false);
+    }
+  }, [topicName]);
+
+  useEffect(() => { fetchSchema(); }, [fetchSchema]);
+
+  // Payload validation
+  const validatePayload = (val) => {
+    try { JSON.parse(val); setJsonError(null); return true; }
+    catch (e) { setJsonError('Invalid JSON: ' + e.message); return false; }
+  };
+
+  const handlePayloadChange = (val) => { setPayload(val); validatePayload(val); };
+
+  const handleResetPayload = () => {
+    if (inputSchema) {
+      const p = JSON.stringify(generateExampleFromSchema(inputSchema), null, 2);
+      setPayload(p);
+      validatePayload(p);
+    }
+  };
+
+  // Send event
+  const handleSend = async () => {
+    if (!validatePayload(payload)) return;
+    setIsSending(true);
+    setSendError(null);
+    try {
+      const res = await fetch('/api/unstable/events/publish', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ topic: topicName, payload: JSON.parse(payload), sender_id: 'ui-test' }),
+      });
+      if (!res.ok) { const d = await res.json().catch(() => ({})); throw new Error(d.detail || 'Failed to publish event'); }
+      const data = await res.json();
+      if (data.trace_id) {
+        window.dispatchEvent(new CustomEvent('traceStarted', {
+          detail: { traceId: data.trace_id, startPolling: true },
+        }));
+      }
+      if (tray.isCollapsed) tray.setIsCollapsed(false);
+    } catch (e) {
+      setSendError(e.message);
+    } finally {
+      setIsSending(false);
+    }
+  };
+
+
   return (
-    <div className="space-y-6">
-      {/* Topic Header */}
-      <div className="flex items-center justify-between mb-8">
-        <div className="flex items-center space-x-4">
-          <Radio className="h-8 w-8 text-[var(--color-brand-blue-600)]" />
-          <div>
-            <h1 className="text-3xl font-bold text-gray-900">{topicName}</h1>
-            <div className="flex items-center mt-2 space-x-4">
-              <span className="text-sm text-gray-500">{subscribingAgents.length} subscribing agents</span>
-            </div>
-          </div>
+    <div className="h-full flex flex-col">
+
+      {/* Header — flat row, white background */}
+      <div className="shrink-0 px-6 pt-5 pb-4 border-b border-[var(--color-warm-gray-200)] bg-white">
+        <div className="flex items-center gap-3">
+          <Radio className="w-5 h-5 text-purple-600 shrink-0" />
+          <span className="text-lg font-semibold text-gray-900">{topicName}</span>
+          <span className="text-[var(--color-warm-gray-300)] select-none">·</span>
+          <span className="text-sm text-[var(--color-warm-gray-500)]">
+            {subscribingAgents.length} subscribing agent{subscribingAgents.length !== 1 ? 's' : ''}
+          </span>
+          <span className="text-[10px] font-semibold uppercase tracking-widest text-[var(--color-warm-gray-500)] ml-1">
+            • Local Testing
+          </span>
         </div>
       </div>
 
-      {/* 2-Column Layout: Main Content + Sidebar */}
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+      {/* Body — flex-col so the tray is inside this relative container (same structure as AgentDetailsPage) */}
+      <div ref={tray.bodyRef} className="flex-1 flex flex-col min-h-0 relative">
 
-        {/* Main Column (2/3 width) */}
-        <div className="lg:col-span-2 space-y-6">
-          {/* Send Test Event Card */}
-          <SendTestEventCard appState={topicAppState} />
+        {/* Two-column content row */}
+        <div
+          className="flex min-h-0"
+          style={tray.isOverlaying ? { height: tray.MIN_TOP_HEIGHT, flexShrink: 0 } : { flex: 1 }}
+        >
+          {/* Left: Send event / Schema panel */}
+          <div className="flex-1 flex flex-col min-h-0">
 
-          {/* Message Feed Card */}
-          <MessageFeedCard appState={topicAppState} />
-        </div>
+            <TabBar
+              tabs={[
+                { key: 'send', label: 'Send event' },
+                { key: 'schema', label: 'Schema' },
+                { key: 'history', label: 'Local History', badge: runHistoryCount },
+              ]}
+              activeTab={activeTab}
+              onChange={setActiveTab}
+              className="border-b border-[var(--color-warm-gray-200)]"
+            />
 
-        {/* Sidebar Column (1/3 width) */}
-        <div className="space-y-6">
+            {/* Send event tab */}
+            <div className={`flex-1 flex flex-col min-h-0 px-5 pt-4 pb-4 gap-3 ${activeTab !== 'send' ? 'hidden' : ''}`}>
+              <div className="shrink-0 flex items-center justify-between">
+                <label className="text-xs font-medium text-gray-700 uppercase tracking-wide">
+                  JSON Payload
+                </label>
+                <button
+                  onClick={handleResetPayload}
+                  disabled={!inputSchema || isSending}
+                  className="flex items-center gap-1 text-xs text-[#677c97] hover:text-gray-700 disabled:opacity-40"
+                >
+                  <RotateCcw className="w-3 h-3" />
+                  Reset payload
+                </button>
+              </div>
+              <JsonTextarea
+                value={payload}
+                onChange={handlePayloadChange}
+                error={jsonError}
+                disabled={isSending}
+              />
+              {sendError && <p className="shrink-0 text-xs text-red-500">{sendError}</p>}
+              <div className="shrink-0">
+                <Button
+                  onClick={handleSend}
+                  disabled={isSending || !!jsonError}
+                >
+                  {isSending
+                    ? <><Loader2 className="w-4 h-4 mr-2 animate-spin" />Sending…</>
+                    : <><Send className="w-4 h-4 mr-2" />Send event</>
+                  }
+                </Button>
+              </div>
+            </div>
 
-          {/* Subscribing Agents Card */}
-          <Card className="border-0 shadow-sm bg-gray-50">
-            <CardHeader className="pb-3">
-              <CardTitle className="text-lg font-semibold text-gray-900">
-                Subscribing Agents ({subscribingAgents.length})
-              </CardTitle>
-            </CardHeader>
-            <CardContent className="pt-0 pb-6">
-              {subscribingAgents.length === 0 ? (
-                <div className="text-center py-4">
-                  <Waypoints className="w-8 h-8 mx-auto mb-2 text-gray-400" />
-                  <p className="text-sm text-gray-500">No agents subscribe to this topic</p>
+            {/* Schema tab */}
+            <div className={`flex-1 min-h-0 overflow-y-auto px-5 py-4 ${activeTab !== 'schema' ? 'hidden' : ''}`}>
+              {schemaLoading ? (
+                <div className="flex items-center gap-2 text-sm text-gray-500 py-4">
+                  <Loader2 className="w-4 h-4 animate-spin" />
+                  Loading schema…
+                </div>
+              ) : schemaError ? (
+                <p className="text-sm text-gray-500 py-4">{schemaError}</p>
+              ) : rawSchemaEntries?.length > 0 ? (
+                <div className="space-y-6">
+                  {rawSchemaEntries.map((entry, i) => (
+                    <div key={i} className="space-y-3">
+                      <div className="flex items-center gap-2">
+                        <span className="text-xs font-semibold text-gray-700">
+                          {entry.schema?.handler_name || 'Handler'}
+                        </span>
+                        <span className="text-xs text-gray-400">— {entry.agent_name}</span>
+                      </div>
+                      {entry.schema?.handler_doc && (
+                        <p className="text-xs text-gray-500 italic">{entry.schema.handler_doc}</p>
+                      )}
+                      {entry.schema?.input_schema
+                        ? <SchemaDisplay schema={entry.schema.input_schema} />
+                        : <p className="text-xs text-gray-400">No input schema defined.</p>
+                      }
+                    </div>
+                  ))}
                 </div>
               ) : (
-                <div className="space-y-3">
-                  {subscribingAgents.map((agent, index) => {
-                    // Show topics this agent subscribes to
-                    const relevantTopics = agent.topics || [];
+                <p className="text-sm text-gray-500 py-4">No schema registered for this topic.</p>
+              )}
+            </div>
 
-                    return (
-                      <div key={agent.name || index} className="border border-gray-200 rounded-md p-3 hover:bg-gray-50 cursor-pointer transition-colors"
-                           onClick={() => showAgentDetails(agent)}>
-                        <div className="flex items-center mb-2">
-                          <Waypoints className="w-4 h-4 text-[var(--color-brand-blue-500)] mr-2" />
-                          <span className="text-sm font-medium text-gray-900 hover:text-blue-600 transition-colors">{agent.name}</span>
-                          <span className="ml-auto text-xs px-2 py-1 bg-green-100 text-green-800 rounded-full">
-                            {agent.status || 'unknown'}
+            {/* Local History tab */}
+            <div className={`flex-1 flex min-h-0 ${activeTab !== 'history' ? 'hidden' : ''}`}>
+              <RunHistoryPanel
+                agentKey={historyAgentKey}
+                isTopicView
+                emptyMessage="Send an event to see history here"
+                onAllRunsChange={(runs) => setRunHistoryCount(runs.length)}
+                agentDisplayName={topicName}
+              />
+            </div>
+          </div>
+
+          {/* Right: Subscribing agents */}
+          <div className="w-60 shrink-0 flex flex-col border-l border-[var(--color-warm-gray-200)]">
+            <div className="shrink-0 px-4 py-2.5 border-b border-[var(--color-warm-gray-200)]">
+              <span className="text-xs font-semibold text-gray-500 uppercase tracking-wide">
+                Subscribing agents
+              </span>
+            </div>
+            {subscribingAgents.length === 0 ? (
+              <div className="flex flex-col items-center justify-center flex-1 gap-2 px-4 py-8 text-center">
+                <Waypoints className="w-7 h-7 text-gray-300" />
+                <p className="text-xs text-gray-400">No agents subscribe to this topic</p>
+              </div>
+            ) : (
+              <div className="flex-1 overflow-y-auto py-1">
+                {subscribingAgents.map((agent, index) => {
+                  const handlerFns = (agent.functions || [])
+                    .filter(f => f.triggers?.some(t => t.type === 'topic' && t.topic === topicName))
+                    .map(f => f.name)
+                    .filter(Boolean);
+                  return (
+                    <button
+                      key={agent.name || index}
+                      onClick={() => navigate('/agents/' + encodeURIComponent(agent.name))}
+                      className="w-full flex items-start gap-2.5 px-4 py-2.5 hover:bg-gray-50 transition-colors text-left group"
+                    >
+                      <Waypoints className="w-4 h-4 text-teal-800 shrink-0 mt-0.5" />
+                      <div className="flex flex-col min-w-0 flex-1">
+                        <span className="text-sm text-gray-800 font-medium truncate group-hover:text-blue-600 transition-colors">
+                          {agent.name}
+                        </span>
+                        {handlerFns.length > 0 && (
+                          <span className="flex items-center gap-1 text-xs text-gray-400 truncate">
+                            <Code className="w-3 h-3 shrink-0" />
+                            {handlerFns.join(', ')}
                           </span>
-                        </div>
-                        {relevantTopics.length > 0 && (
-                          <div className="ml-6">
-                            <p className="text-xs text-gray-500 mb-1">Subscribed topics:</p>
-                            {relevantTopics.map((topic, topicIndex) => (
-                              <div key={topicIndex} className="text-xs text-gray-600">
-                                • {topic}
-                              </div>
-                            ))}
-                          </div>
                         )}
                       </div>
-                    );
-                  })}
-                </div>
-              )}
-            </CardContent>
-          </Card>
-
-          {/* Topic Details Card */}
-          <Card className="border-0 shadow-sm bg-gray-50">
-            <CardHeader className="pb-3">
-              <CardTitle className="text-lg font-semibold text-gray-900">Topic Details</CardTitle>
-            </CardHeader>
-            <CardContent className="pt-0 pb-6">
-              <div className="grid grid-cols-1 gap-4">
-                <div className="flex justify-between py-2">
-                  <span className="text-sm font-medium text-gray-600">Name</span>
-                  <span className="text-sm text-gray-900 font-medium">{topicName}</span>
-                </div>
-                <div className="flex justify-between py-2">
-                  <span className="text-sm font-medium text-gray-600">Subscribers</span>
-                  <span className="text-sm text-gray-900">{subscribingAgents.length} agents</span>
-                </div>
-                <div className="flex justify-between py-2">
-                  <span className="text-sm font-medium text-gray-600">Type</span>
-                  <span className="text-sm text-gray-900">Event Topic</span>
-                </div>
+                      <div className={`w-2 h-2 rounded-full shrink-0 mt-1.5 ${dotColor(agent.status)}`} />
+                    </button>
+                  );
+                })}
               </div>
-            </CardContent>
-          </Card>
-
+            )}
+          </div>
         </div>
+
+        <OutputTray
+          {...tray}
+          tabs={[{ key: 'output', label: 'Output' }]}
+          activeTab="output"
+          onTabChange={() => {}}
+          isRunning={isRunning}
+          hasFeedContent={hasFeedContent}
+          onClear={() => feedClearRef.current?.()}
+        >
+          <div className={`flex-1 min-h-0 overflow-y-auto px-6 py-4 bg-white ${tray.isCollapsed ? 'hidden' : ''}`}>
+            <MessageFeedCard
+              appState={topicAppState}
+              onRunningChange={setIsRunning}
+              onHasContentChange={setHasFeedContent}
+              clearRef={feedClearRef}
+            />
+          </div>
+        </OutputTray>
       </div>
+
     </div>
   );
 };

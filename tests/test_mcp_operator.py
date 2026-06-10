@@ -6,6 +6,7 @@ import tempfile
 from pathlib import Path
 from unittest.mock import call, patch
 
+import httpx
 import pytest
 
 from dispatch_cli.auth_provider import ResolvedCredential, StaticCredentialProvider
@@ -544,72 +545,61 @@ def _tool_fn(mcp, name: str):
 
 
 @pytest.mark.unit
-class TestDeployAgentGuard:
-    """The deploy_agent tool must not silently overwrite another user's agent.
-
-    Ownership is enforced server-side (and pre-checked by the CLI), so the tool
-    just shells out and surfaces the resulting block as a "blocked" status.
-    """
+class TestStartLocalAgentDev:
+    """Tests for start_local_agent_dev process orchestration."""
 
     @pytest.mark.asyncio
-    async def test_blocks_agent_owned_by_another_user(self):
-        from dispatch_cli.mcp.operator.tools import DeployAgentRequest
+    async def test_surfaces_router_start_subprocess_error(self):
+        from dispatch_cli.mcp.operator.tools import StartLocalAgentDevRequest
 
-        deploy = _tool_fn(_make_operator(FakeOperatorBackendClient()), "deploy_agent")
-        # The CLI exits non-zero with a message naming the owner and pointing
-        # at --overwrite when the agent belongs to someone else.
-        fake_proc = _FakeProcess([])
-        fake_proc.stderr = _FakeStream(
-            [
-                b"Agent 'existing-agent' already exists in namespace 'test-ns' "
-                b"and is owned by alice@example.com. Pass --overwrite to "
-                b"overwrite it.\n"
-            ]
+        start = _tool_fn(
+            _make_operator(FakeOperatorBackendClient()), "start_local_agent_dev"
         )
-        fake_proc.returncode = 1
+
+        class UnavailableHealthClient:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return None
+
+            async def get(self, url: str, **kwargs):
+                request = httpx.Request("GET", url)
+                raise httpx.ConnectError("router unavailable", request=request)
+
+        class FailedRouterStart:
+            returncode = 1
+
+            async def communicate(self):
+                return b"", b"ERROR: Port 8080 is already in use\n"
 
         async def fake_exec(*args, **kwargs):
-            return fake_proc
+            return FailedRouterStart()
 
         with tempfile.TemporaryDirectory() as tmp:
-            _write_agent_dir(tmp, "existing-agent")
-            with patch("asyncio.create_subprocess_exec", side_effect=fake_exec):
-                result = await deploy(
-                    DeployAgentRequest(agent_directory=tmp), _FakeCtx()
-                )
+            _write_agent_dir(tmp, "test-agent")
+            with (
+                patch(
+                    "dispatch_cli.mcp.operator.tools.httpx.AsyncClient",
+                    return_value=UnavailableHealthClient(),
+                ),
+                patch(
+                    "asyncio.create_subprocess_exec",
+                    side_effect=fake_exec,
+                ),
+            ):
+                with pytest.raises(RuntimeError, match="Port 8080 is already in use"):
+                    await start(
+                        StartLocalAgentDevRequest(agent_directory=tmp), _FakeCtx()
+                    )
 
-        assert result.status == "blocked"
-        assert result.job_id is None
-        assert "alice@example.com" in result.message
-        assert "overwrite=true" in result.message
 
-    @pytest.mark.asyncio
-    async def test_overwrite_true_passes_flag_to_cli(self):
-        from dispatch_cli.mcp.operator.tools import DeployAgentRequest
-
-        deploy = _tool_fn(_make_operator(FakeOperatorBackendClient()), "deploy_agent")
-        fake_proc = _FakeProcess(
-            [b"DEPLOY_JOB_ID=job-123\n", b"DEPLOY_NAMESPACE=test-ns\n"]
-        )
-        captured_args: list = []
-
-        async def fake_exec(*args, **kwargs):
-            captured_args.extend(args)
-            return fake_proc
-
-        with tempfile.TemporaryDirectory() as tmp:
-            _write_agent_dir(tmp, "existing-agent")
-            with patch("asyncio.create_subprocess_exec", side_effect=fake_exec):
-                result = await deploy(
-                    DeployAgentRequest(agent_directory=tmp, overwrite=True), _FakeCtx()
-                )
-
-        assert "--overwrite" in captured_args
-        assert result.status == "submitted"
-        assert result.job_id == "job-123"
+@pytest.mark.unit
+class TestDeployAgent:
+    """Tests for the deploy_agent MCP tool."""
 
     @pytest.mark.asyncio
-    async def test_owner_deploys_without_overwrite_flag(self):
+    async def test_deploys_without_extra_flags_by_default(self):
         from dispatch_cli.mcp.operator.tools import DeployAgentRequest
 
         deploy = _tool_fn(_make_operator(FakeOperatorBackendClient()), "deploy_agent")
@@ -623,12 +613,38 @@ class TestDeployAgentGuard:
             return fake_proc
 
         with tempfile.TemporaryDirectory() as tmp:
-            _write_agent_dir(tmp, "brand-new-agent")
+            _write_agent_dir(tmp, "my-agent")
             with patch("asyncio.create_subprocess_exec", side_effect=fake_exec):
                 result = await deploy(
                     DeployAgentRequest(agent_directory=tmp), _FakeCtx()
                 )
 
-        assert "--overwrite" not in captured_args
+        assert "--skip-checks" not in captured_args
         assert result.status == "submitted"
         assert result.job_id == "job-9"
+
+    @pytest.mark.asyncio
+    async def test_skip_checks_true_passes_flag_to_cli(self):
+        from dispatch_cli.mcp.operator.tools import DeployAgentRequest
+
+        deploy = _tool_fn(_make_operator(FakeOperatorBackendClient()), "deploy_agent")
+        fake_proc = _FakeProcess(
+            [b"DEPLOY_JOB_ID=job-5\n", b"DEPLOY_NAMESPACE=test-ns\n"]
+        )
+        captured_args: list = []
+
+        async def fake_exec(*args, **kwargs):
+            captured_args.extend(args)
+            return fake_proc
+
+        with tempfile.TemporaryDirectory() as tmp:
+            _write_agent_dir(tmp, "my-agent")
+            with patch("asyncio.create_subprocess_exec", side_effect=fake_exec):
+                result = await deploy(
+                    DeployAgentRequest(agent_directory=tmp, skip_checks=True),
+                    _FakeCtx(),
+                )
+
+        assert "--skip-checks" in captured_args
+        assert result.status == "submitted"
+        assert result.job_id == "job-5"

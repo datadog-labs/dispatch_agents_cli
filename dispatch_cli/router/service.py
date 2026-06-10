@@ -17,12 +17,12 @@ from agentservice.v1 import (
     request_response_pb2,
     service_pb2_grpc,
 )
-from dispatch_agents import LLMToolCall
-from dispatch_agents.models import (
+from dispatch_agents._internal.models import (
     EventRequest,
     FunctionMessage,
     InvokeFunctionRequest,
     KVStoreRequest,
+    LLMCallMessage,
     Message,
     PublishEventBody,
     PublishResponse,
@@ -32,6 +32,7 @@ from dispatch_agents.models import (
     SubscriptionResponse,
     TopicMessage,
 )
+from dispatch_agents.models import LLMToolCall
 from dotenv import load_dotenv
 from fastapi import APIRouter, FastAPI, HTTPException, Query, Request
 from fastapi.responses import FileResponse, Response
@@ -256,6 +257,16 @@ class SystemStatus(StrictBaseModel):
     network_name: str = "dispatch-network"
 
 
+class AgentWarning(StrictBaseModel):
+    """A structured dev-mode warning surfaced to the local UI."""
+
+    type: str
+    severity: str
+    title: str
+    description: str
+    items: list[str] = Field(default_factory=list)
+
+
 # Backend-compatible subscription storage
 _subscriptions_lock: asyncio.Lock = asyncio.Lock()
 _subscriptions_by_topic: dict[str, set[str]] = {}
@@ -269,6 +280,10 @@ _agents: dict[str, dict] = {}  # agent_name -> {url, functions, topics, last_see
 # This allows CLI to tell router the correct gRPC port before the agent subscribes
 _preregistered_urls_lock: asyncio.Lock = asyncio.Lock()
 _preregistered_urls: dict[str, str] = {}  # agent_name -> url (e.g., "127.0.0.1:50052")
+
+# Per-agent warnings collected by the CLI at dev startup (secrets, MCP, LLM keys, etc.)
+_agent_warnings_lock: asyncio.Lock = asyncio.Lock()
+_agent_warnings: dict[str, list[AgentWarning]] = {}  # agent_name -> warnings list
 
 # In-memory memory storage for local development
 _memory_lock: asyncio.Lock = asyncio.Lock()
@@ -296,6 +311,11 @@ _invocations: dict[str, dict[str, Any]] = {}  # invocation_id -> invocation reco
 _llm_calls_lock: asyncio.Lock = asyncio.Lock()
 _llm_calls: deque = deque(maxlen=500)  # Recent LLM calls across all traces
 _llm_calls_by_trace_id: dict[str, deque] = {}  # trace_id -> deque of LLM calls
+
+# Run history storage (in-memory, lifetime of the router process)
+_run_history_lock: asyncio.Lock = asyncio.Lock()
+_run_history: dict[str, deque] = {}  # agent_name -> deque of runs (newest first)
+MAX_RUN_HISTORY_PER_AGENT = 50
 
 
 class InvocationStatus:
@@ -330,6 +350,19 @@ class InvocationStatusResponse(StrictBaseModel):
     result: dict[str, Any] | None = None
     error: str | None = None
     created_at: str
+
+
+class SaveRunRequest(StrictBaseModel):
+    """A completed test run saved by the local UI for history."""
+
+    run_id: str
+    function_name: str
+    payload: dict[str, Any] | None = None
+    messages: list[Message]
+    llm_calls: list[LLMCallMessage]
+    status: str  # "success" | "error"
+    error_message: str | None = None
+    timestamp: str
 
 
 # LLM request/response models (mirrors backend/models/llm.py)
@@ -547,6 +580,7 @@ async def publish(body: PublishEventBody):
         event_uid=message.uid,
         invocation_ids=invocation_ids,
         handler_count=len(invocation_ids),
+        trace_id=message.trace_id,
     )
 
 
@@ -555,6 +589,7 @@ class RegisterAgentBody(StrictBaseModel):
 
     agent_name: str
     url: str  # Full URL including port, e.g., "127.0.0.1:50052"
+    warnings: list[AgentWarning] = Field(default_factory=list)
 
 
 @api_router.post("/agents/register")
@@ -570,9 +605,46 @@ async def register_agent(body: RegisterAgentBody):
     async with _preregistered_urls_lock:
         _preregistered_urls[body.agent_name] = body.url
 
+    async with _agent_warnings_lock:
+        _agent_warnings[body.agent_name] = body.warnings
+
     logger.info(f"Pre-registered agent '{body.agent_name}' at {body.url}")
 
     return {"message": f"Agent '{body.agent_name}' registered", "url": body.url}
+
+
+@api_router.get("/agents/{agent_name}/warnings")
+async def get_agent_warnings(agent_name: str):
+    """Get dev-mode warnings for a specific agent (missing secrets, LLM keys, MCP, etc.)."""
+    async with _agent_warnings_lock:
+        warnings = list(_agent_warnings.get(agent_name, []))
+    return {"agent_name": agent_name, "warnings": warnings}
+
+
+@api_router.post("/agents/{agent_name}/runs")
+async def save_agent_run(agent_name: str, body: SaveRunRequest):
+    """Save a completed test run for an agent (used by local UI run history)."""
+    async with _run_history_lock:
+        if agent_name not in _run_history:
+            _run_history[agent_name] = deque(maxlen=MAX_RUN_HISTORY_PER_AGENT)
+        _run_history[agent_name].appendleft(body.model_dump())
+    return {"ok": True}
+
+
+@api_router.get("/agents/{agent_name}/runs")
+async def get_agent_runs(agent_name: str):
+    """Return saved run history for an agent (newest first)."""
+    async with _run_history_lock:
+        runs = list(_run_history.get(agent_name, deque()))
+    return {"runs": runs}
+
+
+@api_router.delete("/agents/{agent_name}/runs")
+async def clear_agent_runs(agent_name: str):
+    """Clear all saved run history for an agent."""
+    async with _run_history_lock:
+        _run_history[agent_name] = deque(maxlen=MAX_RUN_HISTORY_PER_AGENT)
+    return {"ok": True}
 
 
 @api_router.post("/events/subscribe", response_model=SubscriptionResponse)
@@ -708,6 +780,7 @@ async def route_message_to_agents_with_invocations(
                 "agent_name": agent_name,
                 "function_name": topic,  # For topic handlers, use topic as function_name
                 "trace_id": message.trace_id,
+                "parent_id": message.uid,  # Link back to the topic event that triggered this
                 "payload": message.payload,
                 "sender_id": message.sender_id,
                 "result": None,
@@ -752,8 +825,13 @@ async def _execute_topic_handler_invocation(
             _invocations[invocation_id]["status"] = InvocationStatus.RUNNING
 
     try:
-        # Send via gRPC
-        result = await send_message_via_grpc(agent_name, agent_url, message)
+        # Send via gRPC, passing invocation_id as the uid so the SDK sets
+        # _current_invocation_id to invocation_id. Any downstream publish_event
+        # calls inside the handler will then use invocation_id as parent_id,
+        # giving the frontend the parent→child link needed to build the trace tree.
+        result = await send_message_via_grpc(
+            agent_name, agent_url, message, uid_override=invocation_id
+        )
 
         if result and result.get("status") == "success":
             # Success - store result in invocations table
@@ -862,7 +940,11 @@ async def route_message_to_agents(topic: str, message: Message) -> dict[str, Any
 
 
 async def send_message_via_grpc(
-    agent_name: str, grpc_target, message: Message, timeout: float = 60.0 * 60 * 24
+    agent_name: str,
+    grpc_target,
+    message: Message,
+    timeout: float = 60.0 * 60 * 24,
+    uid_override: str | None = None,
 ) -> dict | None:
     """Send a message to an agent via gRPC (port 50051).
 
@@ -912,7 +994,7 @@ async def send_message_via_grpc(
                 payload=payload,
                 trace_id=message.trace_id,
                 ts=message.ts,
-                uid=message.uid,
+                uid=uid_override if uid_override is not None else message.uid,
             )
 
             # Make gRPC call

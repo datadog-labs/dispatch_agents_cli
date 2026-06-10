@@ -69,7 +69,7 @@ resources:                             # Container resource limits
     memory: "1Gi"                      # e.g. "512Mi", "1Gi", "2Gi"
 ```
 
-> **env:** Platform-reserved names (`BACKEND_URL`, `DISPATCH_API_KEY`, etc.) cannot be used as keys.
+> **env:** Any name starting with `DISPATCH_` is reserved by the platform (e.g. `DISPATCH_BACKEND_URL`, `DISPATCH_API_KEY`) and cannot be used as a key. Use the dedicated `log_level` and `llm_instrument` fields to configure SDK behavior.
 > **secrets:** LLM provider keys (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, etc.) are managed by the LLM gateway — no need to list them here.
 > **resources:** Defaults are `250m` CPU and `2Gi` memory. Values must form a valid ECS Fargate combination.
 

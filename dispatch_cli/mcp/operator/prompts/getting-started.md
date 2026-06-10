@@ -46,6 +46,7 @@ Parameters:
 ```
 
 This creates a directory with:
+
 - `agent.py` — the main entrypoint with handler functions
 - `dispatch.yaml` — deployment configuration
 - `pyproject.toml` — Python dependencies
@@ -120,7 +121,7 @@ Subscribe to GitHub webhook events:
 
 ```python
 from dispatch_agents import on
-from dispatch_agents.integrations.github import PullRequestReviewCommentCreated
+from dispatch_agents.integrations.github.events import PullRequestReviewCommentCreated
 
 @on(github_event=PullRequestReviewCommentCreated)
 async def on_pr_review_comment(event: PullRequestReviewCommentCreated) -> None:

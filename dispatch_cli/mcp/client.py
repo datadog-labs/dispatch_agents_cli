@@ -7,6 +7,7 @@ from typing import Any, Protocol
 import httpx
 
 from dispatch_cli.http_client import get_api_headers
+from dispatch_cli.version_check import enforce_minimum_cli_version
 
 from .config import MCPConfig
 from .models import (
@@ -181,7 +182,13 @@ class DispatchAPIClient:
         return f"{self.config.deploy_url}{endpoint}"
 
     def _headers(self) -> dict[str, str]:
-        """Resolve fresh auth headers for each request."""
+        """Resolve fresh auth headers for each request.
+
+        Also enforces the backend's minimum CLI version here, so a long-running
+        MCP server that has fallen behind stops with a clear "update + restart"
+        message instead of emitting confusing downstream errors.
+        """
+        enforce_minimum_cli_version(self.config.api_base)
         credential = self.config.credential_provider.resolve()
         return get_api_headers(credential.access_token)
 
