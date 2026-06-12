@@ -2055,6 +2055,45 @@ _PROXY_PROVIDER_CONFIG: dict[str, dict[str, Any]] = {
 }
 
 
+# Mirrors backend ENDPOINT_TO_FORMAT / _format_from_endpoint
+# (llm-proxy/llm_provider_service.py). Newer SDKs (PR #384) no longer send
+# provider_format on /llm/proxy, so the local router derives it from the
+# endpoint path the same way the production gateway does.
+_ENDPOINT_TO_FORMAT: dict[str, str] = {
+    "/v1/chat/completions": "openai",
+    "/v1/responses": "openai",
+    "/v1/messages": "anthropic",
+}
+
+
+def _format_from_endpoint(endpoint: str) -> str | None:
+    """Derive wire format from an endpoint path; None for unknown paths.
+
+    Sub-paths like /v1/messages/count_tokens match their parent prefix.
+    """
+    for prefix, fmt in _ENDPOINT_TO_FORMAT.items():
+        if endpoint == prefix or endpoint.startswith(prefix + "/"):
+            return fmt
+    return None
+
+
+def _resolve_provider(provider_format: str | None, path: str) -> str:
+    """Resolve the wire format from an explicit value or the request path.
+
+    Raises HTTP 400 when neither yields a supported provider.
+    """
+    provider = provider_format or _format_from_endpoint(path)
+    if not provider or provider not in _PROXY_PROVIDER_CONFIG:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Cannot resolve provider for '{path}' "
+                f"(provider_format={provider_format!r}). Supported: openai, anthropic"
+            ),
+        )
+    return provider
+
+
 class _ProviderResponseInfo:
     """Parsed fields from a raw provider response, for trace logging."""
 
@@ -2156,7 +2195,10 @@ def _extract_provider_response_info(
 class LLMProxyRequest(StrictBaseModel):
     """Request from the sidecar proxy for chat/messages endpoints."""
 
-    provider_format: str = Field(description="Provider: 'openai' or 'anthropic'")
+    provider_format: str | None = Field(
+        default=None,
+        description="Wire format: 'openai' or 'anthropic'. Derived from endpoint when omitted.",
+    )
     body: dict[str, Any] = Field(description="Raw SDK request body")
     endpoint: str = Field(
         description="Provider endpoint path, e.g. /v1/chat/completions or /v1/responses"
@@ -2171,7 +2213,14 @@ class LLMProxyRequest(StrictBaseModel):
 class LLMPassthroughRequest(StrictBaseModel):
     """Request from the sidecar proxy for unsupported/passthrough endpoints."""
 
-    provider_format: str = Field(description="Provider: 'openai' or 'anthropic'")
+    provider_format: str | None = Field(
+        default=None,
+        description=(
+            "Wire format: 'openai' or 'anthropic'. The sidecar normally sends "
+            "this; if omitted it is derived from the path, which only resolves "
+            "for known prefixes (/v1/chat/completions, /v1/responses, /v1/messages)."
+        ),
+    )
     path: str = Field(description="Provider API path, e.g. '/v1/embeddings'")
     method: str = Field(default="POST", description="HTTP method")
     body: dict[str, Any] | None = Field(default=None)
@@ -2200,14 +2249,8 @@ async def llm_proxy(request_data: LLMProxyRequest):
     from dispatch_cli.router.local_llm import LocalLLMError, get_api_key
 
     logger = get_logger()
-    provider = request_data.provider_format
-
-    config = _PROXY_PROVIDER_CONFIG.get(provider)
-    if not config:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Unsupported provider_format: '{provider}'. Supported: openai, anthropic",
-        )
+    provider = _resolve_provider(request_data.provider_format, request_data.endpoint)
+    config = _PROXY_PROVIDER_CONFIG[provider]
 
     # Get API key from environment / Keychain
     try:
@@ -2509,14 +2552,8 @@ async def llm_passthrough(request_data: LLMPassthroughRequest):
     from dispatch_cli.router.local_llm import LocalLLMError, get_api_key
 
     logger = get_logger()
-    provider = request_data.provider_format
-
-    config = _PROXY_PROVIDER_CONFIG.get(provider)
-    if not config:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Unsupported provider_format: '{provider}'. Supported: openai, anthropic",
-        )
+    provider = _resolve_provider(request_data.provider_format, request_data.path)
+    config = _PROXY_PROVIDER_CONFIG[provider]
 
     # Get API key from environment / Keychain
     try:

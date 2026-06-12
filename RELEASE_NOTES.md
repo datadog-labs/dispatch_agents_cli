@@ -1,1 +1,5 @@
-### Breaking Changes  - Behavioral toggles previously configured via DISPATCH_ environment variables have moved to fields in the dispatch.yaml configuration file. Update your configuration accordingly, as the old environment variables are no longer supported.  ### Features  - **Agent cloning and source download**: Agents can now be cloned with source retrieval support, making it easier to fork and build on existing agents. - **MCP create_agent promotion**: The create_agent tool is now surfaced as the required first step when onboarding new agents via MCP, improving guided workflows. - **LLM configuration warnings and run history** are now surfaced in the local UI - **Redesigned local development UI** with URL-based routing, a resizable output tray, a topic feed, run history panel, and per-agent function details panel, providing a significantly improved local development experience.  ### Bug Fixes  - Fixed a port detection issue in the local development server that could prevent the UI from connecting correctly.
+## Features
+- The `dispatch_agents.logging` module is now part of the public API, making logging configuration officially supported for use in agent code.
+
+## Bug Fixes
+- Dispatch-managed MCP servers are now correctly skipped during local development, preventing conflicts between local and cloud-managed server configurations.
