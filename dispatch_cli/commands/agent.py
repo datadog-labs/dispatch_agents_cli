@@ -1003,6 +1003,7 @@ def dev(
         if active:
             router_port = active["port"]
             logger.success(f"Using running router on port {router_port}")
+            logger.info(f"  • View local dashboard: {LOCAL_ROUTER_URL}:{router_port}")
         else:
             # Try to start on the default port
             router_port = LOCAL_ROUTER_PORT
