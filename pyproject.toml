@@ -1,6 +1,6 @@
 [project]
 name = "dispatch-cli"
-version = "0.11.3"
+version = "0.11.6"
 description = ""
 authors = [
     {name = "Diamond Bishop", email = "diamond.bishop@datadoghq.com"},
@@ -15,7 +15,7 @@ dependencies = [
     "toml",
     "requests>=2.33.1",
     "tomlkit>=0.13.3",
-    "black>=25.11.0",
+    "black>=26.5.1",
     "isort>=6.1.0",
     "requests-toolbelt>=1.0.0",
     "dispatch_agents",
@@ -25,12 +25,12 @@ dependencies = [
     "uvicorn>=0.38.0",
     "types-toml>=0.10.8.20240310",
     "mcp>=1.26.0",
-    "packaging>=24.2",
-    "platformdirs>=4.5.1",
+    "packaging>=26.2",
+    "platformdirs>=4.10.0",
     "watchfiles>=1.1.1",
     "protobuf==6.33.5",
     "questionary>=2.0.1",
-    "pathspec>=1.0.4",
+    "pathspec>=1.1.1",
 ]
 
 [dependency-groups]

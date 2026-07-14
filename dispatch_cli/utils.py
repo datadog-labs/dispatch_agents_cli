@@ -11,6 +11,7 @@ import requests
 import tomlkit
 import typer
 import yaml
+from dispatch_agents._internal.constants import DEFAULT_SYSTEM_PACKAGES
 from dispatch_agents.models import DispatchConfig, ResourceConfig, VolumeConfig
 from pydantic import ValidationError
 from tomlkit.items import Item
@@ -82,8 +83,6 @@ def get_sdk_dependency() -> str:
 
     return SDK_DEPENDENCY
 
-
-DEFAULT_SYSTEM_PACKAGES = ["curl", "unzip", "wget", "git", "ssh"]
 
 INTERACTIVE_CONFIG_OPTIONS: dict[str, dict] = {
     "namespace": {
@@ -225,7 +224,13 @@ def save_dispatch_yaml(path: str, config: dict) -> None:
 def _config_for_yaml(config: dict) -> dict:
     """Return a serializable subset of config for dispatch.yaml."""
     keys = DispatchConfig.model_fields
-    always_include = {"namespace", "agent_name", "entrypoint", "base_image"}
+    always_include = {
+        "namespace",
+        "agent_name",
+        "entrypoint",
+        "base_image",
+        "system_packages",
+    }
 
     payload: dict[str, object] = {}
     for key in keys:
@@ -236,17 +241,6 @@ def _config_for_yaml(config: dict) -> dict:
             continue
 
         if value is None:
-            continue
-
-        if key == "system_packages":
-            # Always save system_packages to preserve user's explicit choice
-            # Filter out defaults but keep empty list if user explicitly chose no extras
-            extras = [
-                pkg
-                for pkg in _coerce_string_list(value)
-                if pkg not in DEFAULT_SYSTEM_PACKAGES
-            ]
-            payload[key] = extras  # Save empty list or list with extras
             continue
 
         if isinstance(value, list | dict) and not value:
@@ -315,15 +309,11 @@ def _coerce_string_list(value: object | None) -> list[str]:
     return [str(item) for item in items if str(item)]
 
 
-def _merge_system_packages(value: object | None) -> list[str]:
-    merged: list[str] = []
-    for pkg in DEFAULT_SYSTEM_PACKAGES:
-        if pkg not in merged:
-            merged.append(pkg)
-    for pkg in _coerce_string_list(value):
-        if pkg not in merged:
-            merged.append(pkg)
-    return merged
+def _seed_system_packages(value: object | None) -> list[str]:
+    """Seed DEFAULT_SYSTEM_PACKAGES for new projects; preserve existing values as-is."""
+    if value is None:
+        return list(DEFAULT_SYSTEM_PACKAGES)
+    return _coerce_string_list(value)
 
 
 def _coerce_dict(key, value: object | None) -> dict[str, str]:
@@ -368,7 +358,7 @@ def _apply_default_values(
     # base_image is intentionally not prepopulated. Omitting it uses the
     # platform default; an unsupported value is rejected at deploy time.
 
-    updated["system_packages"] = _merge_system_packages(updated.get("system_packages"))
+    updated["system_packages"] = _seed_system_packages(updated.get("system_packages"))
     updated["local_dependencies"] = _coerce_dict(
         "local_dependencies", updated.get("local_dependencies")
     )
