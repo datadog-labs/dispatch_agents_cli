@@ -32,6 +32,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      id-token: write
     steps:
       - name: Download dist artifacts
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
@@ -39,9 +40,21 @@ jobs:
           name: dist
           path: dist/
 
+      - name: Get dd-octo-sts token
+        id: octo-sts
+        uses: DataDog/dd-octo-sts-action@96a25462dbcb10ebf0bfd6e2ccc917d2ab235b9a # v1.0.4
+        with:
+          scope: datadog-labs/dispatch_agents_cli
+          policy: self.release.push
+
+      - name: Verify dd-octo-sts token
+        run: gh auth status
+        env:
+          GH_TOKEN: ${{ steps.octo-sts.outputs.token }}
+
       - name: Create or update GitHub Release
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ steps.octo-sts.outputs.token }}
           GH_REPO: ${{ github.repository }}
           TAG: ${{ needs.version_policy.outputs.current_tag }}
         run: |
