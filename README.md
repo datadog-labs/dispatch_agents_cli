@@ -81,12 +81,13 @@ Run `dispatch --help` or `dispatch <command> --help` for the full command refere
 
 Skills are reusable [SKILL.md files](SKILL.md) that provide instructions for AI agents, designed for sharing domain expertise and standardized behaviors across teams.
 
-The fastest way to get started is with the Claude Code plugin:
+The fastest way to get started is to register the Dispatch Operator MCP server with your AI client:
 
 ```bash
-claude plugin marketplace add datadog-labs/dispatch_agents_sdk && claude plugin install dispatch-agents@dispatch-agents
-/dispatch-agents:getting-started
+dispatch mcp serve operator --register claude
 ```
+
+This gives Claude Code the getting-started knowledge and agent-management tools directly. See the [MCP Quickstart](https://dispatchagents.ai/docs/mcp-quickstart) for Cursor and Codex.
 
 All `dispatch skills` commands accept `--namespace` to target a specific namespace. Without it, the namespace resolves from the `--namespace` flag, `DISPATCH_NAMESPACE` env var, or `dispatch.yaml` in the current directory.
 
